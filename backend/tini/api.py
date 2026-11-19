@@ -1159,3 +1159,232 @@ def inflect_verify(session_id: str, record: dict[str, Any]) -> Any:
         raise HTTPException(404, f"the record names a file this session does not have: {exc}") from exc
     except (ValueError, TypeError) as exc:
         raise HTTPException(400, f"not a usable record: {exc}") from exc
+
+
+# ============================================ Version 4.2: batch analysis
+# One batch -> N independent file analyses -> one consolidated collection.
+# tini.inflect.batch owns the work; these routes validate, persist and serve.
+
+import hashlib as _hashlib                                                    # noqa: E402
+import json as _json                                                          # noqa: E402
+from fastapi.responses import JSONResponse, Response                          # noqa: E402
+from .inflect import batch as inf_batch                                       # noqa: E402
+from .inflect import export as inf_export                                     # noqa: E402
+
+_BATCH_LIMITS = inf_batch.BatchLimits.from_env()
+
+
+def _batch(batch_id: str) -> inf_batch.Batch:
+    try:
+        return inf_batch.open_batch(settings, batch_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+def _download(data: bytes, name: str, media: str) -> Response:
+    return Response(data, media_type=media, headers={"content-disposition": f'attachment; filename="{name}"'})
+
+
+async def _read_limited(f: UploadFile, limit: int) -> bytes | None:
+    """The upload's bytes, or None when it exceeds the per-file limit."""
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await f.read(1 << 20)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@app.get("/api/inflect/batch-spec")
+def inflect_batch_spec() -> Any:
+    return {"limits": _BATCH_LIMITS.to_dict(), "supported_extensions": sorted(inf_batch.SUPPORTED_EXTENSIONS),
+            "defaults": inf_batch.BatchSettings().to_dict(), "detectors": list(inf_batch.DETECTORS),
+            "algorithm_version": inf_batch.ALGORITHM_VERSION}
+
+
+@app.get("/api/inflect/batches")
+def inflect_batches() -> Any:
+    return {"batches": inf_batch.list_batches(settings)}
+
+
+@app.post("/api/inflect/batches")
+async def inflect_batch_create(
+    files: list[UploadFile] = File(...),
+    relative_paths: list[str] = Form(default=[]),
+    title: str = Form(""),
+    settings_json: str = Form("{}"),
+    start: bool = Form(False),
+    force_new: bool = Form(False),
+) -> Any:
+    """Create a batch from many files. Nothing is analysed unless ``start`` is true."""
+    lim = _BATCH_LIMITS
+    if not files:
+        raise HTTPException(400, "no files in the upload")
+    if len(files) > lim.max_files:
+        raise HTTPException(400, f"at most {lim.max_files} files per batch")
+    try:
+        bs = inf_batch.BatchSettings.from_dict(_json.loads(settings_json or "{}"))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, f"bad settings: {exc}") from exc
+
+    uploads: list[dict[str, Any]] = []
+    total = 0
+    for i, f in enumerate(files):
+        name = Path(f.filename or "file").name or "file"
+        rel = inf_batch._clean_relative(relative_paths[i] if i < len(relative_paths) else (f.filename or ""), name)
+        ext = Path(name).suffix.lower()
+        up: dict[str, Any] = {"filename": name, "relative_path": rel}
+        if ext not in inf_batch.SUPPORTED_EXTENSIONS:
+            up.update(error=f"unsupported file type '{ext or 'none'}'", status="skipped", error_kind="unsupported")
+        else:
+            data = await _read_limited(f, lim.max_file_bytes)
+            if data is None:
+                up.update(error=f"file exceeds the {lim.max_file_bytes // (1024 * 1024)} MB limit", error_kind="oversize")
+            else:
+                total += len(data)
+                if total > lim.max_total_bytes:
+                    raise HTTPException(413, "upload exceeds the total size limit")
+                up.update(data=data, size=len(data))
+        uploads.append(up)
+
+    if not force_new:
+        fp = _hashlib.sha256("|".join(sorted(
+            f"{u['relative_path']}:{inf_batch.sha256_bytes(u['data']) if 'data' in u else None}" for u in uploads
+        )).encode()).hexdigest()[:24]
+        existing = inf_batch.find_existing(settings, fp)
+        if existing is not None:
+            return {"id": existing.id, "reused": True, "batch": existing.public_manifest(),
+                    "files": existing.manifest()["files"]}
+
+    b = inf_batch.Batch.create(settings, uploads, title or f"{len(files)} files", bs, lim)
+    if start:
+        inf_batch.runner.start(b, lim)
+    return {"id": b.id, "reused": False, "batch": b.public_manifest(), "files": b.manifest()["files"]}
+
+
+@app.get("/api/inflect/batches/{batch_id}")
+def inflect_batch(batch_id: str) -> Any:
+    return _batch(batch_id).public_manifest()
+
+
+@app.get("/api/inflect/batches/{batch_id}/files")
+def inflect_batch_files(batch_id: str) -> Any:
+    b = _batch(batch_id)
+    return {"batch": b.public_manifest(), "files": b.manifest()["files"]}
+
+
+class BatchAnalyseRequest(BaseModel):
+    settings: dict[str, Any] | None = None
+    file_overrides: dict[str, dict[str, Any]] | None = None
+    file_ids: list[str] | None = None
+    force: bool = False
+
+
+@app.post("/api/inflect/batches/{batch_id}/analyse")
+def inflect_batch_analyse(batch_id: str, req: BatchAnalyseRequest | None = None) -> Any:
+    """Start or resume. Finished files whose bytes and settings are unchanged are not recomputed."""
+    req = req or BatchAnalyseRequest()
+    b = _batch(batch_id)
+    if inf_batch.runner.is_running(b.id):
+        raise HTTPException(409, "this batch is already being analysed")
+    m = b.manifest()
+    try:
+        if req.settings:
+            merged = {**m["settings"], **req.settings}
+            inf_batch.BatchSettings.from_dict(merged)
+            m["settings"] = merged
+        if req.file_overrides:
+            known = {f["file_id"] for f in m["files"]}
+            bad = [k for k in req.file_overrides if k not in known]
+            if bad:
+                raise ValueError(f"unknown file ids: {bad}")
+            for v in req.file_overrides.values():
+                inf_batch.BatchSettings.from_dict({**m["settings"], **v})
+            m["file_overrides"] = {**m.get("file_overrides", {}), **req.file_overrides}
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, f"bad settings: {exc}") from exc
+    b.write_manifest(m)
+    started = inf_batch.runner.start(b, _BATCH_LIMITS, req.file_ids, req.force)
+    return {"started": started, "batch": b.public_manifest()}
+
+
+@app.post("/api/inflect/batches/{batch_id}/cancel")
+def inflect_batch_cancel(batch_id: str) -> Any:
+    b = _batch(batch_id)
+    inf_batch.runner.cancel(b.id)
+    return b.public_manifest()
+
+
+@app.get("/api/inflect/batches/{batch_id}/files/{file_id}")
+def inflect_batch_file(batch_id: str, file_id: str) -> Any:
+    b = _batch(batch_id)
+    rec = next((f for f in b.manifest()["files"] if f["file_id"] == file_id), None)
+    if rec is None:
+        raise HTTPException(404, f"no file {file_id} in batch {batch_id}")
+    return {"file": rec, "analysis": b.analysis(file_id)}
+
+
+@app.get("/api/inflect/batches/{batch_id}/plots")
+def inflect_batch_plots(batch_id: str, group: str | None = None, max_points: int = Query(600, ge=50, le=3000),
+                        ids: str | None = None, max_curves: int = Query(300, ge=1, le=1000)) -> Any:
+    """Combined plotting data. ``group`` picks a compatible group (``__all__`` for any files by ``ids``)."""
+    wanted = [i for i in (ids or "").split(",") if i] or None
+    return inf_batch.build_plots(_batch(batch_id), group, max_points, wanted, max_curves)
+
+
+@app.get("/api/inflect/batches/{batch_id}/export")
+def inflect_batch_export(batch_id: str) -> Any:
+    b = _batch(batch_id)
+    return _download(inf_export.workbook_bytes(b), "Inflect_Batch_Results.xlsx",
+                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.get("/api/inflect/batches/{batch_id}/export/plots.zip")
+def inflect_batch_export_plots(batch_id: str) -> Any:
+    return _download(inf_export.plots_zip(_batch(batch_id)), "Inflect_Batch_Plots.zip", "application/zip")
+
+
+@app.get("/api/inflect/batches/{batch_id}/export/report.md")
+def inflect_batch_export_report(batch_id: str) -> Any:
+    return _download(inf_export.report_markdown(_batch(batch_id)), "Inflect_Batch_Report.md", "text/markdown")
+
+
+@app.get("/api/inflect/batches/{batch_id}/export/{kind}.csv")
+def inflect_batch_export_csv(batch_id: str, kind: str) -> Any:
+    b = _batch(batch_id)
+    try:
+        data = inf_export.csv_bytes(b, kind)
+    except KeyError:
+        raise HTTPException(400, f"kind must be one of {sorted(inf_export.CSV_KINDS)}") from None
+    return _download(data, f"Inflect_{kind}.csv", "text/csv")
+
+
+@app.get("/api/inflect/batches/{batch_id}/files/{file_id}/plot.png")
+def inflect_batch_file_plot(batch_id: str, file_id: str) -> Any:
+    b = _batch(batch_id)
+    a = b.analysis(file_id)
+    if not a or a.get("status") != "completed":
+        raise HTTPException(404, "this file has no completed analysis")
+    return Response(inf_export.plot_png(a), media_type="image/png")
+
+
+@app.get("/api/inflect/batches/{batch_id}/files/{file_id}/analysis.json")
+def inflect_batch_file_json(batch_id: str, file_id: str) -> Any:
+    b = _batch(batch_id)
+    a = b.analysis(file_id)
+    if a is None:
+        raise HTTPException(404, "this file has no analysis")
+    return JSONResponse(a, headers={"content-disposition": f'attachment; filename="{file_id}_analysis.json"'})
+
+
+@app.get("/api/inflect/batches/{batch_id}/files/{file_id}/transitions.csv")
+def inflect_batch_file_transitions(batch_id: str, file_id: str) -> Any:
+    b = _batch(batch_id)
+    if not any(f["file_id"] == file_id for f in b.manifest()["files"]):
+        raise HTTPException(404, f"no file {file_id}")
+    return _download(inf_export.file_transitions_csv(b, file_id), f"{file_id}_transitions.csv", "text/csv")

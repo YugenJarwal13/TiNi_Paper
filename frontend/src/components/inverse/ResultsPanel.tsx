@@ -1,15 +1,15 @@
 import { useMemo } from 'react'
-import { ComposedChart, Line, ReferenceDot, ReferenceLine, ResponsiveContainer, Scatter, Tooltip, YAxis } from 'recharts'
-import type { InvBootstrap, InvParams, InvProfiles, InvResult } from '../../api/inverse'
+import { Bar, ComposedChart, Line, ReferenceDot, ReferenceLine, ResponsiveContainer, Scatter, Tooltip, YAxis } from 'recharts'
+import type { InvBootstrap, InvParams, InvProfiles, InvResult, InvSyntheticPhase, SynthDesignFull } from '../../api/inverse'
 import { fixed, pct, pval, sci } from '../../lib/format'
 import { M } from '../Math'
-import { Empty, Figure, Grid, Panel, Tip, chart } from '../ui'
-import { PARAM_KEYS, PARAM_LABEL, PARAM_UNIT, Table, XLog, fmtParam, interval } from './shared'
+import { Empty, Figure, Grid, Panel, Tip, XNum, YNum, chart } from '../ui'
+import { PARAM_KEYS, PARAM_LABEL, PARAM_UNIT, Table, XLog, fmtParam, histBins, interval } from './shared'
 
 /* F. The inferred parameters with their uncertainty, the shape of the
  * likelihood around them, what changes when the V1 choices change, and what
  * a synthetic experiment says the design can and cannot determine. */
-export function ResultsPanel({ result, profiles, boot }: { result: InvResult | null; profiles: InvProfiles | null; boot: InvBootstrap | null }) {
+export function ResultsPanel({ result, profiles, boot, synthDoc }: { result: InvResult | null; profiles: InvProfiles | null; boot: InvBootstrap | null; synthDoc: InvSyntheticPhase | null }) {
   const lead = <>Three numbers with three kinds of uncertainty — and which of them this experiment can actually determine.</>
   if (!result) {
     return (
@@ -139,6 +139,20 @@ export function ResultsPanel({ result, profiles, boot }: { result: InvResult | n
         </div>
       </div>
 
+      {boot && (
+        <div style={{ marginTop: 30 }}>
+          <div className="figure__title">bootstrap distributions · marginal histogram per parameter, {boot.n_ok} refits</div>
+          <div className="grid-3">
+            {PARAM_KEYS.map((k) => (
+              <BootHist key={k} k={k} boot={boot} mle={result.fit.params[k]} paper={P[k].paper} />
+            ))}
+          </div>
+          <p className="figure__note">
+            Black: this fit. Grey: the paper. A skewed or two-humped shape here is a property of the likelihood around the optimum, not visible in the CI alone.
+          </p>
+        </div>
+      )}
+
       {syn && (
         <div style={{ marginTop: 30 }}>
           <div className="figure__title">
@@ -162,6 +176,28 @@ export function ResultsPanel({ result, profiles, boot }: { result: InvResult | n
             Data simulated from the model itself. With this dataset's design U‡ and ξ‡ come back within ±20 % but Γ₀ scatters over a decade; the paper's four-rate
             design pins all three.
           </p>
+
+          {synthDoc && 'designs' in synthDoc && (
+            <div style={{ marginTop: 20 }}>
+              <div className="figure__title">recovered-parameter distributions · one histogram per design, truth marked</div>
+              {synthDoc.designs.map((d) => (
+                <div key={d.name} style={{ marginTop: 14 }}>
+                  <div className="figure__note" style={{ marginBottom: 6 }}>
+                    {d.name} · {d.fits.length} converged fits of {d.replicates}
+                  </div>
+                  <div className="grid-3">
+                    {PARAM_KEYS.map((k) => (
+                      <SynthHist key={k} k={k} design={d} truth={synthDoc.truth[k]} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <p className="figure__note">
+                Each bar chart is the refit parameter across the replicates for that design, with the truth it was simulated from marked. A tight pile on the mark
+                is a design that can recover the parameter; a spread across the panel is one that cannot.
+              </p>
+            </div>
+          )}
         </div>
       )}
 
@@ -221,5 +257,57 @@ function BootScatter({ boot, mle, paper }: { boot: InvBootstrap; mle: InvParams;
         </ComposedChart>
       </ResponsiveContainer>
     </div>
+  )
+}
+
+/** Marginal histogram of one parameter's bootstrap resamples. Γ₀ is binned in log space — it is reported on a log axis everywhere else on this page because it spans decades. */
+function BootHist({ k, boot, mle, paper }: { k: keyof InvParams; boot: InvBootstrap; mle: number; paper: number }) {
+  const values = useMemo(() => boot.draws.map((d) => d[k]), [boot, k])
+  const log = k === 'gamma0'
+  const data = useMemo(() => histBins(values, 16, log), [values, log])
+  const lo = Math.min(...values, mle, paper)
+  const hi = Math.max(...values, mle, paper)
+  return (
+    <Figure title={<>{PARAM_LABEL[k]} · bootstrap</>}>
+      <div className="chart chart--short">
+        <ResponsiveContainer>
+          <ComposedChart data={data} margin={chart.margin}>
+            <Grid />
+            {log ? <XLog dataKey="x" label={PARAM_UNIT[k]} lo={lo} hi={hi} fmt={(v) => fmtParam(k, v, 0)} /> : <XNum dataKey="x" label={PARAM_UNIT[k]} />}
+            <YNum label="refits" width={36} />
+            <Tooltip content={<Tip unitX={PARAM_UNIT[k]} fmtX={(v) => fmtParam(k, v)} rows={(p) => `${p.value} refits`} />} cursor={{ fill: 'rgba(0,0,0,0.03)' }} />
+            <Bar dataKey="n" fill={chart.model} fillOpacity={0.6} isAnimationActive={false} radius={[2, 2, 0, 0]} />
+            {paper >= lo && paper <= hi && <ReferenceDot x={paper} y={0} r={4} fill={chart.ink3} stroke="#fff" strokeWidth={1.5} />}
+            <ReferenceDot x={mle} y={0} r={4} fill={chart.ink} stroke="#fff" strokeWidth={1.5} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+    </Figure>
+  )
+}
+
+/** Marginal histogram of one parameter's recovered value across a synthetic-recovery design's replicates, truth marked. */
+function SynthHist({ k, design, truth }: { k: keyof InvParams; design: SynthDesignFull; truth: number }) {
+  const values = useMemo(() => design.fits.filter((f) => f.converged).map((f) => f[k]), [design, k])
+  const log = k === 'gamma0'
+  const data = useMemo(() => histBins(values, 12, log), [values, log])
+  if (!values.length) return <Figure title={<>{PARAM_LABEL[k]}</>}><Empty>No converged fits.</Empty></Figure>
+  const lo = Math.min(...values, truth)
+  const hi = Math.max(...values, truth)
+  return (
+    <Figure title={<>{PARAM_LABEL[k]} · recovered</>}>
+      <div className="chart chart--short">
+        <ResponsiveContainer>
+          <ComposedChart data={data} margin={chart.margin}>
+            <Grid />
+            {log ? <XLog dataKey="x" label={PARAM_UNIT[k]} lo={lo} hi={hi} fmt={(v) => fmtParam(k, v, 0)} /> : <XNum dataKey="x" label={PARAM_UNIT[k]} />}
+            <YNum label="replicates" width={36} />
+            <Tooltip content={<Tip unitX={PARAM_UNIT[k]} fmtX={(v) => fmtParam(k, v)} rows={(p) => `${p.value} replicates`} />} cursor={{ fill: 'rgba(0,0,0,0.03)' }} />
+            <Bar dataKey="n" fill={chart.accent} fillOpacity={0.6} isAnimationActive={false} radius={[2, 2, 0, 0]} />
+            <ReferenceDot x={truth} y={0} r={4} fill={chart.ink} stroke="#fff" strokeWidth={1.5} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+    </Figure>
   )
 }

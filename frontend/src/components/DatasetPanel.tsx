@@ -39,6 +39,21 @@ export function DatasetPanel({ version, selected, onSelect }: { version: number;
     return bins
   }, [files.data])
 
+  const rateHist = useMemo(() => {
+    const vals = (files.data?.files ?? []).map((f) => f.ext_rate_A_per_ps)
+    if (!vals.length) return []
+    const lo = Math.min(...vals),
+      hi = Math.max(...vals)
+    const n = 12
+    const w = (hi - lo) / n || 1
+    const bins = Array.from({ length: n }, (_, i) => ({ x: lo + (i + 0.5) * w, n: 0 }))
+    vals.forEach((v) => {
+      const i = Math.min(n - 1, Math.max(0, Math.floor((v - lo) / w)))
+      bins[i].n += 1
+    })
+    return bins
+  }, [files.data])
+
   const sort = (k: keyof FileRow) => {
     if (k === sortKey) setAsc(!asc)
     else {
@@ -132,19 +147,37 @@ export function DatasetPanel({ version, selected, onSelect }: { version: number;
             </div>
           )}
         </div>
-        <Figure title="Raw peak force per file" note="argmax of the raw trace — noise-inflated; the smoothed peak in section 1.4 is the one used for the transition statistics.">
-          <div className="chart chart--short">
-            <ResponsiveContainer>
-              <BarChart data={peakHist} margin={chart.margin} barCategoryGap={2}>
-                <Grid />
-                <XNum dataKey="x" label="raw max f [pN]" />
-                <YNum label="files" width={40} />
-                <Tooltip content={<Tip unitX="pN" fmtX={(v) => v.toFixed(1)} rows={(p) => `${p.value} files`} />} cursor={{ fill: 'rgba(0,0,0,0.03)' }} />
-                <Bar dataKey="n" fill={chart.accent} isAnimationActive={false} radius={[3, 3, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </Figure>
+        <div>
+          <Figure title="Raw peak force per file" note="argmax of the raw trace — noise-inflated; the smoothed peak in section 1.4 is the one used for the transition statistics.">
+            <div className="chart chart--short">
+              <ResponsiveContainer>
+                <BarChart data={peakHist} margin={chart.margin} barCategoryGap={2}>
+                  <Grid />
+                  <XNum dataKey="x" label="raw max f [pN]" />
+                  <YNum label="files" width={40} />
+                  <Tooltip content={<Tip unitX="pN" fmtX={(v) => v.toFixed(1)} rows={(p) => `${p.value} files`} />} cursor={{ fill: 'rgba(0,0,0,0.03)' }} />
+                  <Bar dataKey="n" fill={chart.accent} isAnimationActive={false} radius={[3, 3, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </Figure>
+          <Figure
+            title="Extension rate per file"
+            note="The same rate the paper used to pick this file set; the readout above collapses this to one ratio, the spread shows whether any file is actually off it."
+          >
+            <div className="chart chart--short">
+              <ResponsiveContainer>
+                <BarChart data={rateHist} margin={chart.margin} barCategoryGap={2}>
+                  <Grid />
+                  <XNum dataKey="x" label="extension rate [Å/ps]" />
+                  <YNum label="files" width={40} />
+                  <Tooltip content={<Tip unitX="Å/ps" fmtX={(v) => v.toExponential(3)} rows={(p) => `${p.value} files`} />} cursor={{ fill: 'rgba(0,0,0,0.03)' }} />
+                  <Bar dataKey="n" fill={chart.ink} isAnimationActive={false} radius={[3, 3, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </Figure>
+        </div>
       </div>
 
       <div style={{ marginTop: 30 }}>

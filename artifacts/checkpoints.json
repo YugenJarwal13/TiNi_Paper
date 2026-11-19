@@ -1,10 +1,10 @@
 {
   "inspect": {
     "stage": "inspect",
-    "fingerprint": "663923fe3b547f7f-929570a7e1b7b9c8-41ebd78f",
-    "completed_at": 1789621190.6880682,
-    "completed_at_iso": "2026-09-17T10:29:50",
-    "duration_s": 0.01,
+    "fingerprint": "663923fe3b547f7f-5139483268f7e058-281f1532",
+    "completed_at": 1793218368.1197014,
+    "completed_at_iso": "2026-10-29T01:42:48",
+    "duration_s": 0.058,
     "outputs": [
       "inspection.json"
     ],
@@ -15,10 +15,10 @@
   },
   "validate": {
     "stage": "validate",
-    "fingerprint": "136391f441590b6d-929570a7e1b7b9c8-aab6d384",
-    "completed_at": 1789621190.776519,
-    "completed_at_iso": "2026-09-17T10:29:50",
-    "duration_s": 0.082,
+    "fingerprint": "136391f441590b6d-5139483268f7e058-42770fe9",
+    "completed_at": 1793218368.4374993,
+    "completed_at_iso": "2026-10-29T01:42:48",
+    "duration_s": 0.309,
     "outputs": [
       "validation.json"
     ],
@@ -30,10 +30,10 @@
   },
   "preprocess": {
     "stage": "preprocess",
-    "fingerprint": "663923fe3b547f7f-929570a7e1b7b9c8-41ebd78f",
-    "completed_at": 1789621190.8310206,
-    "completed_at_iso": "2026-09-17T10:29:50",
-    "duration_s": 0.049,
+    "fingerprint": "663923fe3b547f7f-5139483268f7e058-281f1532",
+    "completed_at": 1793218370.551057,
+    "completed_at_iso": "2026-10-29T01:42:50",
+    "duration_s": 2.107,
     "outputs": [
       "traces.npz",
       "files.csv",
@@ -50,10 +50,10 @@
   },
   "statistics": {
     "stage": "statistics",
-    "fingerprint": "0105e9af560b2672-929570a7e1b7b9c8-f559a7e2",
-    "completed_at": 1789621190.8823693,
-    "completed_at_iso": "2026-09-17T10:29:50",
-    "duration_s": 0.047,
+    "fingerprint": "0105e9af560b2672-5139483268f7e058-5e55634d",
+    "completed_at": 1793218370.7302427,
+    "completed_at_iso": "2026-10-29T01:42:50",
+    "duration_s": 0.167,
     "outputs": [
       "average_curves.csv",
       "force_rate.json",
@@ -68,10 +68,10 @@
   },
   "potential": {
     "stage": "potential",
-    "fingerprint": "7c66b56c5d93679f-929570a7e1b7b9c8-86c28c92",
-    "completed_at": 1789621190.9046028,
-    "completed_at_iso": "2026-09-17T10:29:50",
-    "duration_s": 0.017,
+    "fingerprint": "7c66b56c5d93679f-5139483268f7e058-12aafaf1",
+    "completed_at": 1793218370.778084,
+    "completed_at_iso": "2026-10-29T01:42:50",
+    "duration_s": 0.032,
     "outputs": [
       "potential.json",
       "potential_curves.csv"
@@ -82,10 +82,10 @@
   },
   "charts": {
     "stage": "charts",
-    "fingerprint": "4d72728f761113e0-929570a7e1b7b9c8-99869980",
-    "completed_at": 1789621191.423726,
-    "completed_at_iso": "2026-09-17T10:29:51",
-    "duration_s": 0.514,
+    "fingerprint": "4d72728f761113e0-5139483268f7e058-12b601db",
+    "completed_at": 1793218372.503647,
+    "completed_at_iso": "2026-10-29T01:42:52",
+    "duration_s": 1.697,
     "outputs": [
       "charts/traces_overlay.png",
       "charts/mean_trace.png",

@@ -20,22 +20,31 @@ import { SummaryPanel } from './components/SummaryPanel'
 import { TracePanel } from './components/TracePanel'
 import { InversePage } from './components/inverse/InversePage'
 import { ForwardPage } from './components/forward/ForwardPage'
-import { InflectPage } from './components/inflect/InflectPage'
+import { InflectWorkspace } from './components/inflect/InflectWorkspace'
+import { DocsPage } from './components/docs/DocsPage'
 import { fixed } from './lib/format'
 import { Fdot } from './components/Math'
 import { ErrorBoundary } from './components/ErrorBoundary'
 
-type Route = 'traces' | 'inverse' | 'forward' | 'inflect'
+type Route = 'inflect' | 'traces' | 'inverse' | 'forward' | 'docs'
+
+const ROUTES: Route[] = ['inflect', 'traces', 'inverse', 'forward', 'docs']
+
+/** Inflect is the landing page: no hash, or one that names nothing, means Inflect. */
+function readRoute(): Route {
+  const h = window.location.hash.replace('#', '').split(/[/?]/)[0]
+  return (ROUTES as string[]).includes(h) ? (h as Route) : 'inflect'
+}
 
 function useRoute(): Route {
-  const read = (): Route => {
-    const h = window.location.hash.replace('#', '')
-    return h === 'inverse' || h === 'forward' || h === 'inflect' ? h : 'traces'
-  }
-  const [route, setRoute] = useState<Route>(read)
+  const [route, setRoute] = useState<Route>(readRoute)
   useEffect(() => {
+    // Put the landing page in the address bar without adding a history entry.
+    if (window.location.hash.replace('#', '').split(/[/?]/)[0] !== readRoute()) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#inflect`)
+    }
     const onHash = () => {
-      setRoute(read())
+      setRoute(readRoute())
       window.scrollTo(0, 0)
     }
     window.addEventListener('hashchange', onHash)
@@ -45,28 +54,32 @@ function useRoute(): Route {
 }
 
 const ROUTE_NAMES: Record<Route, string> = {
-  traces: 'Force traces',
-  inverse: 'Inverse problem',
-  forward: 'Forward model',
   inflect: 'Inflect',
+  traces: 'Force traces',
+  inverse: 'Inverse model',
+  forward: 'Forward model',
+  docs: 'Docs',
 }
 
 export function App() {
   const route = useRoute()
   return (
     <main className="page">
-      <nav className="nav" aria-label="versions">
-        <a className={`nav__link ${route === 'traces' ? 'is-on' : ''}`} href="#traces">
-          <span className="nav__index">1</span> Force traces &amp; landscape
+      <nav className="nav" aria-label="workspaces">
+        <a className={`nav__link ${route === 'inflect' ? 'is-on' : ''}`} href="#inflect" aria-current={route === 'inflect' ? 'page' : undefined}>
+          Inflect
         </a>
-        <a className={`nav__link ${route === 'inverse' ? 'is-on' : ''}`} href="#inverse">
-          <span className="nav__index">2</span> Inverse problem
+        <a className={`nav__link ${route === 'traces' ? 'is-on' : ''}`} href="#traces" aria-current={route === 'traces' ? 'page' : undefined}>
+          Force Traces
         </a>
-        <a className={`nav__link ${route === 'forward' ? 'is-on' : ''}`} href="#forward">
-          <span className="nav__index">3</span> Forward model
+        <a className={`nav__link ${route === 'inverse' ? 'is-on' : ''}`} href="#inverse" aria-current={route === 'inverse' ? 'page' : undefined}>
+          Inverse Model
         </a>
-        <a className={`nav__link ${route === 'inflect' ? 'is-on' : ''}`} href="#inflect">
-          <span className="nav__index">4</span> Inflect &middot; your data
+        <a className={`nav__link ${route === 'forward' ? 'is-on' : ''}`} href="#forward" aria-current={route === 'forward' ? 'page' : undefined}>
+          Forward Model
+        </a>
+        <a className={`nav__link ${route === 'docs' ? 'is-on' : ''}`} href="#docs" aria-current={route === 'docs' ? 'page' : undefined}>
+          Docs
         </a>
       </nav>
       <ErrorBoundary name={ROUTE_NAMES[route]} key={route}>
@@ -74,10 +87,12 @@ export function App() {
           <InversePage />
         ) : route === 'forward' ? (
           <ForwardPage />
-        ) : route === 'inflect' ? (
-          <InflectPage />
-        ) : (
+        ) : route === 'docs' ? (
+          <DocsPage />
+        ) : route === 'traces' ? (
           <TracesPage />
+        ) : (
+          <InflectWorkspace />
         )}
       </ErrorBoundary>
     </main>

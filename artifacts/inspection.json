@@ -1,5 +1,5 @@
 {
-  "data_dir": "C:\\Users\\Sharath\\OneDrive\\Desktop\\TiNi_Paper\\data\\raw\\Force_traces",
+  "data_dir": "C:\\Users\\ushaj\\Desktop\\TiNi_Paper\\data\\raw\\Force_traces",
   "file_glob": "property.T300.*.dat",
   "n_files": 100,
   "max_files_setting": null,
@@ -649,5 +649,5 @@
       "size_bytes": 38919
     }
   ],
-  "dataset_manifest": "929570a7e1b7b9c8"
+  "dataset_manifest": "5139483268f7e058"
 }

@@ -60,6 +60,21 @@ export const XLog = ({ dataKey, label, lo, hi, fmt }: { dataKey: string; label: 
   />
 )
 
+/** Equal-width bins over a sample, in log space when `log` is set (for quantities like Γ₀ that span decades). */
+export function histBins(values: number[], n = 16, log = false): { x: number; n: number }[] {
+  const v = values.filter((x) => Number.isFinite(x) && (!log || x > 0)).map((x) => (log ? Math.log10(x) : x))
+  if (!v.length) return []
+  const lo = Math.min(...v)
+  const hi = Math.max(...v)
+  const w = (hi - lo) / n || 1
+  const bins = Array.from({ length: n }, (_, i) => ({ x: log ? Math.pow(10, lo + (i + 0.5) * w) : lo + (i + 0.5) * w, n: 0 }))
+  v.forEach((x) => {
+    const i = Math.min(n - 1, Math.max(0, Math.floor((x - lo) / w)))
+    bins[i].n += 1
+  })
+  return bins
+}
+
 export function Table({ head, rows, className }: { head: ReactNode[]; rows: ReactNode[][]; className?: string }) {
   return (
     <div className={`table-wrap table-wrap--auto ${className ?? ''}`}>

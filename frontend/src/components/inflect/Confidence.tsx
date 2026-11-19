@@ -19,6 +19,39 @@ function show(v: number | null | undefined, unit?: string | null, digits = 4): s
   return unit ? `${text} ${unit}` : text
 }
 
+function histogram(values: number[], bins = 20) {
+  const v = values.filter((n) => isFinite(n))
+  if (v.length < 2) return { bars: [], lo: 0, hi: 1 }
+  const lo = Math.min(...v)
+  const hi = Math.max(...v)
+  const span = hi - lo || 1
+  const counts = new Array(bins).fill(0)
+  for (const n of v) counts[Math.min(bins - 1, Math.floor(((n - lo) / span) * bins))] += 1
+  const peak = Math.max(...counts, 1)
+  return { bars: counts.map((c) => c / peak), lo, hi }
+}
+
+/** One resample distribution, as a compact bar strip — the shape behind one of the pills above. */
+function ResampleHist({ label, values, unit }: { label: string; values: number[]; unit?: string | null }) {
+  const hist = histogram(values)
+  if (!hist.bars.length) return null
+  return (
+    <figure className="conf__hist">
+      <figcaption>{label}</figcaption>
+      <svg viewBox="0 0 160 48" className="conf__hist-svg" preserveAspectRatio="none">
+        {hist.bars.map((f, i) => (
+          <rect key={i} x={(i / hist.bars.length) * 160} width={160 / hist.bars.length - 0.8} y={40 - f * 36} height={Math.max(0.6, f * 36)} />
+        ))}
+        <line x1={0} x2={160} y1={40} y2={40} className="conf__hist-axis" />
+      </svg>
+      <div className="conf__hist-scale num">
+        <span>{show(hist.lo, unit)}</span>
+        <span>{show(hist.hi, unit)}</span>
+      </div>
+    </figure>
+  )
+}
+
 function Pill({ label, interval, unit }: { label: string; interval: Interval; unit?: string | null }) {
   return (
     <div className="conf__pill">
@@ -118,6 +151,11 @@ export function Confidence({
             <Pill label="position" interval={t.position} unit={xUnit} />
             <Pill label="value at onset" interval={t.onset} unit={yUnit} />
             <Pill label="size of the step" interval={t.step} unit={yUnit} />
+          </div>
+          <div className="conf__hists">
+            <ResampleHist label="position, across resamples" values={t.position.samples ?? []} unit={xUnit} />
+            <ResampleHist label="onset, across resamples" values={t.onset.samples ?? []} unit={yUnit} />
+            <ResampleHist label="step, across resamples" values={t.step.samples ?? []} unit={yUnit} />
           </div>
         </>
       ) : (

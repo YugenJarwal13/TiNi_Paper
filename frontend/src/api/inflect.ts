@@ -332,7 +332,8 @@ export const inflect = {
 
 // ---------------------------------------------- phase 2: how sure is it, and
 // ---------------------------------------------- what the whole set looks like
-export type Interval = { value: number; ci: [number, number] | null; sd: number | null; n: number }
+/** `samples` is a thinned, sorted sample of the bootstrap replicates behind `value`/`ci` — up to 60 points, enough to draw the distribution's shape. */
+export type Interval = { value: number; ci: [number, number] | null; sd: number | null; n: number; samples?: number[] }
 
 export type Uncertainty = {
   file: string
@@ -533,4 +534,245 @@ export type Preview = {
 
 export const inflectColumns = {
   preview: (id: string, file?: string) => get<Preview>(`/sessions/${id}/preview`, { file }),
+}
+
+
+// ============================================================ batch analysis
+// One batch -> N independent file analyses -> one consolidated collection.
+
+export type BatchFileStatus = 'queued' | 'parsing' | 'analysing' | 'completed' | 'failed' | 'skipped'
+export type BatchStatus = 'created' | 'processing' | 'completed' | 'completed_with_errors' | 'failed'
+
+export type BatchFileDigest = {
+  x: string
+  y: string
+  x_unit: string | null
+  y_unit: string | null
+  point_count: number
+  range: number | null
+  noise: number | null
+  n_regimes: number
+  shape: string
+  primary_type: string | null
+  primary_onset_x: number | null
+  primary_magnitude: number | null
+}
+
+export type BatchFileRecord = {
+  file_id: string
+  filename: string
+  relative_path: string
+  ext: string
+  size_bytes: number
+  sha256: string | null
+  status: BatchFileStatus
+  validation: { ok: boolean; message: string }
+  duplicate_of: string | null
+  error: string | null
+  error_kind: string | null
+  message: string
+  n_transitions: number | null
+  n_warnings: number | null
+  digest?: BatchFileDigest
+  updated_at: number
+}
+
+export type BatchSettings = {
+  x_column: number | null
+  y_column: number | null
+  x_scale: number
+  x_unit: string | null
+  y_unit: string | null
+  n_segments: number | null
+  penalty_scale: number
+  event_threshold: number
+  detectors: 'auto' | string[]
+  with_uncertainty: boolean
+  n_resamples: number
+  skip_duplicates: boolean
+  seed: number
+}
+
+export type BatchInfo = {
+  id: string
+  title: string
+  created_at_iso: string
+  status: BatchStatus
+  running: boolean
+  algorithm_version: string
+  settings: BatchSettings
+  limits: { max_files: number; max_file_bytes: number; max_total_bytes: number; max_rows: number; max_workers: number }
+  counts: Record<BatchFileStatus, number>
+  total: number
+  finished: number
+  percent: number
+  total_transitions: number
+  total_size_bytes: number
+  n_duplicates: number
+}
+
+export type BatchSpec = {
+  limits: BatchInfo['limits']
+  supported_extensions: string[]
+  defaults: BatchSettings
+  detectors: string[]
+  algorithm_version: string
+}
+
+export type BatchTransition = {
+  event_id: string
+  event_number: number
+  type: 'step' | 'knee' | 'peak' | 'valley'
+  method: string
+  onset_x: number
+  onset_y: number
+  settled_x: number | null
+  settled_y: number | null
+  magnitude: number
+  direction: 'upward' | 'downward' | 'not_applicable'
+  width: number | null
+  confidence: { detection_rate: number; position_ci: [number, number] | null; position_median: number | null; estimate_inside_ci: boolean; interval_biased: boolean; n_resamples_used: number; stability_holds: boolean | null; method: string; interpretation: string } | null
+  reliability?: string
+  evidence: Record<string, unknown>
+  detector_settings: Record<string, unknown>
+  classification: string
+  interpretation: string | null
+}
+
+export type BatchRegime = {
+  regime_number: number
+  regime_type: string
+  start_index: number
+  end_index: number
+  start_x: number
+  end_x: number
+  points: number
+  coefficients: number[]
+  coefficient_basis: string
+  r2: number | null
+  residual_sigma: number
+  y_start: number
+  y_end: number
+  slope_start: number
+  slope_end: number
+  curvature: number
+}
+
+export type FileAnalysis = {
+  status: 'completed' | 'failed'
+  file_id: string
+  filename: string
+  relative_path: string
+  sha256: string
+  error?: string
+  error_kind?: string
+  columns: {
+    x: string; y: string; x_unit: string | null; y_unit: string | null
+    x_index: number; y_index: number; chosen_by: string
+    x_reasons: string[]; y_reasons: string[]; headline: string
+  }
+  features: Record<string, number | string | null | Record<string, unknown>>
+  transitions: BatchTransition[]
+  regimes: BatchRegime[]
+  findings: Finding[]
+  warnings: string[]
+  quality: Record<string, unknown> & { rows_read: number; rows_used: number; rows_excluded: number; x_order: string }
+  detector_selection: { mode: string; enabled: string[]; reasons: string[] }
+  settings: BatchSettings
+  algorithm: { version: string; code_hash: string }
+  curve: { x: number[]; y: number[]; decimated: boolean; n_full: number; note: string }
+  reading: Reading | null
+}
+
+export type PlotGroup = { key: string; x: string; y: string; x_unit: string | null; y_unit: string | null; file_ids: string[]; count: number; units_declared: boolean }
+
+export type PlotCurve = {
+  file_id: string
+  filename: string
+  relative_path: string
+  x: number[]
+  y: number[]
+  transitions: Pick<BatchTransition, 'event_id' | 'type' | 'direction' | 'onset_x' | 'onset_y' | 'settled_x' | 'settled_y' | 'magnitude'>[]
+}
+
+export type PlotTransition = PlotCurve['transitions'][number] & { file_id: string; filename: string; group: string; confidence: BatchTransition['confidence'] }
+
+export type BatchPlots = {
+  groups: PlotGroup[]
+  group: string | null
+  incompatible_explanation: string | null
+  curves: PlotCurve[]
+  cohort: { chorus: ChorusResult; ensemble: Pick<EnsembleResult, 'n_ok' | 'stats' | 'outliers' | 'groups' | 'headline'> } | null
+  cohort_note: string | null
+  transitions: PlotTransition[]
+  x_label: string | null
+  y_label: string | null
+  x_unit: string | null
+  y_unit: string | null
+  display_note: string
+  n_in_selection: number
+  truncated: boolean
+  max_curves: number
+}
+
+export type BatchCreated = { id: string; reused: boolean; batch: BatchInfo; files: BatchFileRecord[] }
+
+export const batches = {
+  spec: () => get<BatchSpec>('/batch-spec'),
+  list: () => get<{ batches: { id: string; title: string; created_at_iso: string; status: BatchStatus; total: number; percent: number }[] }>('/batches'),
+  get: (id: string) => get<BatchInfo>(`/batches/${id}`),
+  files: (id: string) => get<{ batch: BatchInfo; files: BatchFileRecord[] }>(`/batches/${id}/files`),
+  file: (id: string, fileId: string) => get<{ file: BatchFileRecord; analysis: FileAnalysis | null }>(`/batches/${id}/files/${fileId}`),
+  plots: (id: string, group?: string, maxPoints = 600, ids?: string[]) =>
+    get<BatchPlots>(`/batches/${id}/plots`, { group, max_points: maxPoints, ids: ids?.join(',') }),
+  analyse: (id: string, body: { settings?: Partial<BatchSettings>; file_ids?: string[]; force?: boolean; file_overrides?: Record<string, Partial<BatchSettings>> } = {}) =>
+    post<{ started: boolean; batch: BatchInfo }>(`/batches/${id}/analyse`, body),
+  cancel: (id: string) => post<BatchInfo>(`/batches/${id}/cancel`),
+
+  /** Upload many files (with their folder paths) as one batch. */
+  create(
+    items: { file: File; path: string }[],
+    opts: { title: string; settings?: Partial<BatchSettings>; start: boolean; forceNew?: boolean },
+    onProgress?: (fraction: number) => void,
+  ): Promise<BatchCreated> {
+    const form = new FormData()
+    form.append('title', opts.title)
+    form.append('start', String(opts.start))
+    form.append('force_new', String(Boolean(opts.forceNew)))
+    form.append('settings_json', JSON.stringify(opts.settings ?? {}))
+    for (const it of items) {
+      form.append('files', it.file, it.file.name)
+      form.append('relative_paths', it.path)
+    }
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${BASE}/batches`)
+      xhr.upload.onprogress = (e) => {
+        if (onProgress && e.lengthComputable) onProgress(e.loaded / e.total)
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) return resolve(JSON.parse(xhr.responseText))
+        let message = `${xhr.status} ${xhr.statusText}`
+        try {
+          const d = JSON.parse(xhr.responseText)
+          if (typeof d.detail === 'string') message = d.detail
+        } catch {
+          /* keep the status line */
+        }
+        reject(new Error(message))
+      }
+      xhr.onerror = () => reject(new Error('the upload could not reach the server'))
+      xhr.send(form)
+    })
+  },
+
+  // downloads
+  url: (id: string, path: string) => `${BASE}/batches/${id}${path}`,
+  workbookUrl: (id: string) => `${BASE}/batches/${id}/export`,
+  csvUrl: (id: string, kind: 'summary' | 'transitions' | 'features' | 'regimes' | 'quality') => `${BASE}/batches/${id}/export/${kind}.csv`,
+  plotsZipUrl: (id: string) => `${BASE}/batches/${id}/export/plots.zip`,
+  reportUrl: (id: string) => `${BASE}/batches/${id}/export/report.md`,
+  filePlotUrl: (id: string, fileId: string) => `${BASE}/batches/${id}/files/${fileId}/plot.png`,
+  fileJsonUrl: (id: string, fileId: string) => `${BASE}/batches/${id}/files/${fileId}/analysis.json`,
+  fileTransitionsUrl: (id: string, fileId: string) => `${BASE}/batches/${id}/files/${fileId}/transitions.csv`,
 }

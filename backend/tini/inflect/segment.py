@@ -45,6 +45,7 @@ CANDIDATE_CUTS = 200
 # With event detection off, a boundary counts as a step when the two fits
 # disagree there by more than this many times the noise.
 JUMP_SIGMA = 4.0
+MAX_LADDER_POINTS = 400
 
 
 @dataclass
@@ -246,7 +247,13 @@ def detect_events(
         # A wide window sees a step through more noise; a narrow one can tell
         # two nearby steps apart. Testing a ladder of widths and keeping the
         # best answer at each sample gets both, which one fixed width cannot.
-        scales = sorted({max(6, n // 60), max(8, n // 30), max(10, n // 15)})
+        # The ladder is proportional to the curve's length, but only up to
+        # MAX_LADDER_POINTS samples: on a long, densely sampled curve a window
+        # of thousands of points blurs a sharp step over a large fraction of
+        # the axis and places it far from where it is. Curves of up to
+        # 15 * MAX_LADDER_POINTS samples are unaffected.
+        n_eff = min(n, 15 * MAX_LADDER_POINTS)
+        scales = sorted({max(6, n_eff // 60), max(8, n_eff // 30), max(10, n_eff // 15)})
     scales = [w for w in scales if 2 * w + 2 < n] or [max(3, (n - 3) // 2)]
 
     ratio = np.zeros(n)

@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, type Config } from '../../api/client'
 import { useResource } from '../../api/hooks'
-import { inverse, type InvBootstrap, type InvDiagnostics, type InvFit, type InvProfiles, type InvProgress, type InvResult, type InvRunList, type InvSample, type InvSpec } from '../../api/inverse'
+import { inverse, type InvBootstrap, type InvDiagnostics, type InvFit, type InvProfiles, type InvProgress, type InvResult, type InvRunList, type InvSample, type InvSpec, type InvSyntheticPhase } from '../../api/inverse'
 import { fixed } from '../../lib/format'
 import { M } from '../Math'
 import { ComparisonPanel } from './ComparisonPanel'
@@ -74,6 +74,7 @@ export function InversePage() {
   const diag = useResource<InvDiagnostics>(() => (runId ? inverse.phase<InvDiagnostics>(runId, 'diagnostics') : Promise.reject(new Error('none'))), [runId], version)
   const profiles = useResource<InvProfiles>(() => (runId ? inverse.phase<InvProfiles>(runId, 'profiles') : Promise.reject(new Error('none'))), [runId], version)
   const boot = useResource<InvBootstrap>(() => (runId ? inverse.phase<InvBootstrap>(runId, 'bootstrap') : Promise.reject(new Error('none'))), [runId], version)
+  const synth = useResource<InvSyntheticPhase>(() => (runId ? inverse.phase<InvSyntheticPhase>(runId, 'synthetic') : Promise.reject(new Error('none'))), [runId], version)
   const fitDoc = useResource<InvFit>(() => (runId ? inverse.phase<InvFit>(runId, 'fit') : Promise.reject(new Error('none'))), [runId], version)
 
   const [sample, setSample] = useState<InvSample | null>(null)
@@ -127,7 +128,7 @@ export function InversePage() {
       <ModelPanel spec={spec.data} sample={sample} fitted={res ? res.fit.params : null} />
       <WorkspacePanel spec={spec.data} progress={progress} runs={runs.data} selectedRun={runId} onSelectRun={setSelected} onRun={run} onResume={resume} onCancel={cancel} />
       <ComparisonPanel result={res} diag={diag.data} sample={sample} />
-      <ResultsPanel result={res} profiles={profiles.data} boot={boot.data} />
+      <ResultsPanel result={res} profiles={profiles.data} boot={boot.data} synthDoc={synth.data} />
       <RecordPanel result={res} spec={spec.data} fit={fitDoc.data} />
 
       <p className="footnote">

@@ -124,6 +124,9 @@ export type InvProfiles = {
 }
 
 export type InvBootstrap = { n_boot: number; n_ok: number; draws: (InvParams & { nll: number })[] }
+export type SynthFit = InvParams & { nll: number; converged: boolean; n_eval: number }
+export type SynthDesignFull = { name: string; rates: number[]; S: number; n_events: number; replicates: number; fits: SynthFit[]; summary: SynthSummary }
+export type InvSyntheticPhase = { truth: InvParams; replicates: number; seed: number; duration_s: number; designs: SynthDesignFull[] }
 export type InvFit = { history: ({ iteration: number; nll: number } & InvParams)[]; starts: { start: InvParams; params: InvParams; nll: number; n_eval: number; n_iter: number; converged: boolean }[] }
 export type InvSampleDoc = InvSample
 export type InvRunList = { runs: { run_id: string; completed_at_iso: string; source: string; n: number; params: InvParams; nll: number; converged: boolean }[]; latest: { run_id: string } | null }

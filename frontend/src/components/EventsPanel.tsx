@@ -24,6 +24,7 @@ export function EventsPanel({ version, defaultSmoothing, fc, onEvents }: { versi
 
   const tHist = useMemo(() => hist(ev.data?.histograms.t_peak_ps), [ev.data])
   const fHist = useMemo(() => hist(ev.data?.histograms.f_crit_from_rate_pN), [ev.data])
+  const pHist = useMemo(() => hist(ev.data?.histograms.f_peak_smoothed_pN), [ev.data])
 
   const lead = (
     <>
@@ -50,7 +51,7 @@ export function EventsPanel({ version, defaultSmoothing, fc, onEvents }: { versi
         </span>
       </div>
 
-      <div className="grid-2">
+      <div className="grid-3">
         <Figure title={<>transition time <M tex="t^\ddagger" /> across traces</>} note="Centred moving average, then the argmax. Wider smoothing reduces noise-triggered early picks but blurs the peak.">
           <div className="chart">
             <ResponsiveContainer>
@@ -87,6 +88,20 @@ export function EventsPanel({ version, defaultSmoothing, fc, onEvents }: { versi
                 <Bar dataKey="n" fill={chart.accent} isAnimationActive={false} radius={[3, 3, 0, 0]} />
                 {d && <ReferenceLine x={d.f_crit_from_rate_pN.mean} stroke={chart.ink} strokeDasharray="3 3" />}
                 {fc !== null && <ReferenceLine x={fc} stroke={chart.model} label={{ value: 'fc', position: 'top', fontSize: 11, fill: chart.model }} />}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Figure>
+        <Figure title={<>smoothed peak force across traces</>} note="The value the picker actually saw before converting it with the force rate — compare its spread with f‡'s to see how much of that spread is the conversion.">
+          <div className="chart">
+            <ResponsiveContainer>
+              <BarChart data={pHist} margin={chart.margin} barCategoryGap={2}>
+                <Grid />
+                <XNum dataKey="x" label="smoothed peak f [pN]" />
+                <YNum label="traces" width={40} />
+                <Tooltip content={<Tip unitX="pN" fmtX={(v) => v.toFixed(1)} rows={(p) => `${p.value} traces`} />} cursor={{ fill: 'rgba(0,0,0,0.03)' }} />
+                <Bar dataKey="n" fill={chart.ink} isAnimationActive={false} radius={[3, 3, 0, 0]} />
+                {d && <ReferenceLine x={d.f_peak_smoothed_pN.mean} stroke={chart.accent} strokeDasharray="3 3" />}
               </BarChart>
             </ResponsiveContainer>
           </div>
