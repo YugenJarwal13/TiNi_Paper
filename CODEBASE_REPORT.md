@@ -35,16 +35,23 @@
    - 6.6 Step 5: Narration & Stage Beat Generation (`transitions.py`)
    - 6.7 Step 6: Multi-Curve Chorus & Cohort Outlier Analysis (`chorus.py`, `ensemble.py`)
    - 6.8 Step 7: Uncertainty, 16-Setting Stability Sweep & Ledger Audit
+   - 6.9 Step 8: Batch Analysis — One Batch, N Independent Files (`batch.py`)
+   - 6.10 Detector Strategies, and What Was Measured About Them
+   - 6.11 Step 9: Histograms
+   - 6.12 Step 10: Exports (`export.py`)
 7. [Frontend Architecture & Interactive Experience](#7-frontend-architecture--interactive-experience)
    - 7.1 Tech Stack & Design System
    - 7.2 Component Tree & View Routing
    - 7.3 The Stage Canvas & Annotation Engine
+   - 7.4 The Inflect Landing Page, Batch Workspace and Docs
 8. [End-to-End User Journey Walkthrough](#8-end-to-end-user-journey-walkthrough)
    - 8.1 File Upload & Interactive Analysis Flow
    - 8.2 Parameter Sweeps & Re-verification Flow
+   - 8.3 Batch Flow: Many Files, One Collection
 9. [Validation, Test Suite & How to Run](#9-validation-test-suite--how-to-run)
-   - 9.1 Test Battery (210 Passing Tests)
+   - 9.1 Test Battery (256 Passing Tests)
    - 9.2 Execution Instructions
+10. [Deployment Notes (Render Free Tier Audit)](#10-deployment-notes-render-free-tier-audit)
 
 ---
 
@@ -107,7 +114,7 @@ The codebase bridges raw nanomechanical simulation data, statistical inference, 
 |                                                                                         |
 |   data/raw/Force_traces/        artifacts/                                              |
 |   (100 MD files, .dat)          traces.npz, checkpoints.json, progress.json,            |
-|                                 inverse/runs/, forward/runs/, inflect/sessions/         |
+|                                 inverse/, forward/, inflect/{sessions,batches}/         |
 +-----------------------------------------------------------------------------------------+
 ```
 
@@ -144,9 +151,11 @@ TiNi_Paper/
 │   │   │   ├── synthetic.py         # Ground-truth sample generation & parameter recovery
 │   │   │   └── uncertainty.py       # Profile likelihood intervals & bootstrap percentiles
 │   │   └── inflect/                 # Version 4: Universal Curve Analysis Engine
+│   │       ├── batch.py             # Batch store, bounded runner, per-file orchestration, plots, histograms
 │   │       ├── chorus.py            # Multi-curve alignment, sparklines & cohort visualization
 │   │       ├── columns.py           # Semantic column classification & (X, Y) ranking
 │   │       ├── ensemble.py          # Cohort statistics & robust MAD outlier detection
+│   │       ├── export.py            # Excel / CSV / ZIP / report exports of a batch
 │   │       ├── findings.py          # Tiered findings ledger (measured, read, concluded)
 │   │       ├── ingest.py            # Sniffer for comment prefixes, delimiters, headers
 │   │       ├── measure.py           # Curve property measurements (stiffness, dynamic range)
@@ -155,7 +164,7 @@ TiNi_Paper/
 │   │       ├── sessions.py          # Session workspace manager on disk
 │   │       ├── transitions.py       # Narration beat generator & chart annotation creator
 │   │       └── uncertainty.py       # Moving-block bootstrap & 16-setting stability sweep
-│   └── tests/                       # 210 automated unit, benchmark, and regression tests
+│   └── tests/                       # 256 automated unit, benchmark, batch and regression tests
 ├── frontend/                        # React 18 + Vite + TypeScript application
 │   ├── src/
 │   │   ├── App.tsx                  # Hash router, navigation bar, master shell
@@ -164,7 +173,8 @@ TiNi_Paper/
 │   │   ├── components/              # V1 panels (Dataset, Trace, Average, Landscape, Events)
 │   │   │   ├── forward/             # V3 Smoluchowski PDE interactive visualizer
 │   │   │   ├── inverse/             # V2 Inverse problem workspace, profiles & comparison
-│   │   │   └── inflect/             # V4 Stage, Narration, Columns, Chorus, Ledger
+│   │   │   ├── inflect/             # V4: guided reader (Stage, Narration, Ledger) and Batch* components
+│   │   │   └── docs/                # In-app technical documentation with full-text search
 │   │   ├── lib/                     # Number formatting and physics helper utilities
 │   │   └── styles/                  # Design tokens, typography, and responsive CSS
 ├── data/raw/Force_traces/           # 100 raw molecular dynamics traces (.dat)
@@ -408,6 +418,73 @@ When multiple files are uploaded together:
   - `concluded`: High-level scientific deduction.
 - **Self-Verifying Record (`record.py`)**: Packages the code commit hash, data hashes, and parameter settings into an audit record with a one-click verification endpoint (`POST /verify`).
 
+### 6.9 Step 8: Batch Analysis — One Batch, N Independent Files (`batch.py`)
+Version 4.2/4.3 turns Inflect from a one-file reader into a multi-file platform. The governing rule is: **one batch → N independent file analyses → one consolidated collection of results.** Raw files are never merged into a single curve; every file keeps its own identity (file id, relative path, SHA-256), raw data, measurements, events, warnings and result.
+
+`batch.py` is an *orchestration layer only*. It calls the existing engine for every file — `ingest.read_table` → `columns.analyse_columns` → `segment.segment_curve` → `measure` / `transitions.read_curve` → `findings.build_ledger` (and, when requested, `uncertainty.bootstrap_curve` / `stability_sweep`) — through one function, `analyse_file()`. There is no second scientific engine.
+
+**Persistence** (beside the single-file sessions, same atomic writer):
+```
+artifacts/inflect/batches/<batch_id>/
+  batch.json                  manifest: files, hashes, statuses, settings, limits, fingerprint
+  files/<file_id>/source.<ext>   the uploaded bytes, never modified
+  files/<file_id>/analysis.json  the file's complete result (or its failure record)
+  files/<file_id>/features.json, transitions.json, regimes.json
+  exports/, logs/
+```
+
+**Statuses.** Per file: `queued → parsing → analysing → completed | failed | skipped`. Per batch (derived from its files): `created`, `processing`, `completed`, `completed_with_errors`, `failed`. A batch of 100 files can end with 97 completed and 3 failed; all 100 remain visible and exportable.
+
+**Runner.** `BatchRunner` starts one background thread per batch, which submits files in chunks to a bounded `ThreadPoolExecutor` (default 4 workers). Each worker reads its own file from disk, writes its own result atomically and drops it, so memory stays bounded however many files are queued. An exception in one file is caught and stored as that file's error (`error_kind`: `parse`, `empty`, `oversize`, `unsupported`, `duplicate`, `insufficient_data`, `columns`, `analysis`); other files continue. The runner is behind `start / is_running / cancel`, so it can later be replaced by a persistent job queue without touching the API shape or the UI.
+
+**Resumability.** Status and results are written after every file. Files left `parsing`/`analysing` by a stopped process return to `queued` on the next read ("interrupted; will resume"). On resume, `plan()` computes only what is needed: queued/interrupted files, files whose *analysis hash* (source SHA-256 + effective settings + algorithm version) changed, and files explicitly requested. Finished, unchanged files are not recomputed. Stopping (`cancel`) lets running files finish and leaves the rest queued.
+
+**Limits** (environment-overridable): `TINI_BATCH_MAX_FILES` (2000), `TINI_BATCH_MAX_FILE_BYTES` (64 MB), `TINI_BATCH_MAX_TOTAL_BYTES` (512 MB), `TINI_BATCH_MAX_ROWS` (500 000), `TINI_BATCH_WORKERS` (4). Over-limit files fail with a clear, file-specific message.
+
+**Explicit data policies** (nothing is silently changed):
+- Rows with a non-finite x or y are excluded, counted (missing vs infinite) and warned about; no value is imputed.
+- A non-monotonic x is flagged; analysis runs in x-sorted order and the uploaded file is unchanged.
+- Duplicate content is detected by hash; "skip duplicates" marks later copies `skipped`. Uploading the same set again returns the existing batch (fingerprint) instead of creating another.
+- Units are preserved per file; the plot and cohort layers group files by `(x name, y name, x unit, y unit)` and never mix groups.
+- Columns are chosen per file by the ranking (near-ties are warned about) or explicitly via settings; a flat response is a successful analysis with zero events.
+
+**Result schema** (per file): `columns` (names, units, reasoning), `features` (statistics, percentiles, slopes, curvature, noise, residual statistics, polynomial fits, event counts), `transitions` (events), `regimes`, `findings` (the ledger), `warnings`, `quality`, `detector_selection`, `settings`, `algorithm` (version + code hash), `histograms`, a display-only decimated `curve`, and `confidence` per event **only when a bootstrap was run** (otherwise `null` — never invented).
+
+### 6.10 Detector Strategies, and What Was Measured About Them
+Events are **algorithmic detections**, not physical transitions: each carries `classification: "algorithmic_detection"` and `interpretation: null`. A detector can return zero, one or many events, and zero is a successful result.
+
+| Type | Detector (`method`) | Source |
+|---|---|---|
+| step (up or down) | `local_detrended_step` — multi-scale detrended step statistic plus the geometric knee-vs-step cross test | existing `segment.py` |
+| knee | `knee_change_point` — slope change at a dynamic-programming breakpoint | existing `segment.py` |
+| peak / valley | `local_extrema` — prominence-gated extrema of the smoothed curve (SciPy `find_peaks`), excluding those beside a step | new, `batch.py` |
+
+"Auto" mode runs all three; manual mode (`detectors: [...]`) runs the chosen ones, and the mode, enabled detectors and every event's settings and evidence are stored. There is no dedicated detector for slow, gradual transitions: they appear (if at all) as knees or wide steps.
+
+Validation on synthetic curves of known answer (500 points, seeded noise) — see also tests in `test_inflect_batch.py`:
+
+| Question | Result | Action taken |
+|---|---|---|
+| Are peaks mistaken for noise? | Initially ~10 % of pure-noise files gave a spurious peak/valley and every autocorrelated file gave hundreds. | A peak must now exceed 10× the noise at the smoothing-window scale (block-mean spread, so correlation is included) **and** 10 % of the range. White noise: 0 events in 60/60 files; AR(1) noise: no peaks. |
+| Does correlated noise fool the knee detector? | Yes — the engine's second-difference noise estimate cannot see correlation, giving ~8 knees per AR(1) / random-walk file. | Residual lag-1 autocorrelation > 0.3 adds a warning and flags knees, peaks and valleys `doubtful: correlated residuals`. The engine itself is unchanged. |
+| Does smoothing move peaks? | Error mean ≈ 0, sd 0.02–0.1 for a width-1 peak; an asymmetric peak is pulled ≈ 0.1 to its broad side. | Position is that of the smoothed curve; the window and a position resolution are stored in each peak's evidence. |
+| Step onset accuracy | Onset (start of the transition zone) is ≈ 0.04 early (two samples), sd 0.07, independent of noise 0.05–0.3. | Documented; overlay and cohort alignment use exactly this onset. |
+| Long curves | On 50 000–200 000 points a step was placed up to two axis units too early, because the detection window grew with curve length. | `MAX_LADDER_POINTS = 400` caps the window ladder (`segment.py`); curves under ~6 000 points are unchanged, all earlier tests pass; the step now lands at 5.98–6.0 for a true 6.0. |
+| Are bootstrap intervals correct? | The point estimate is accurate, but the 95 % interval sat to one side of it in 20/20 test curves (resampled noise moves the onset earlier — documented in the engine as "biased"). | Events carry `estimate_inside_ci` and `interval_biased` plus an interpretation note: use width and detection rate as stability indicators, not as coverage of the true position. |
+
+Performance: a 10 MB, 200 000-row file analysed in ≈ 5 s with ≈ 80 MB peak traced memory; 150 files plus failures complete under the bounded pool.
+
+### 6.11 Step 9: Histograms (`histogram_of`, `/histograms/*`)
+A dedicated **Histograms** tab sits beside Plots (the plots are unchanged). Nothing is drawn until the reader answers a prompt; each of the two blocks has its own "Do you want to see the histogram for this?" and, once shown, "Do you want to see normalized histogram for this?" (counts ↔ density with unit-area bars).
+- **Each file** — four histograms per file from its full-resolution data, computed at analysis time and stored in `analysis.json`: the response values, the change between consecutive points, the residuals around the fit, and the spacing of the axis. Increments and residuals are drawn over the 0.5th–99.5th percentile range and the number of values beyond it is reported (a step would otherwise flatten the bulk); identical values are shown as one bar. Paged, three files at a time.
+- **All files together** — one number per file histogrammed across the files of one compatible group: peak value (maximum of y — the critical force), peak position (the snap time), step size and transition position (of the main step). Files without a step are counted and left out of the two step histograms; at least two values are needed. Files with different variables or units are never pooled (group selector).
+- API: `GET /api/inflect/batches/{id}/histograms/files?ids=…` (1–24 ids) and `GET …/histograms/cross?group=…`. Results saved by an older algorithm version carry no histograms and are reported `stale` until the batch is analysed again (the algorithm version, 4.3, is part of the analysis hash).
+
+### 6.12 Step 10: Exports (`export.py`)
+All exports are built from the *saved* analysis of every file — never from what is on screen — and include failed and skipped files with their errors.
+- **Excel** `Inflect_Batch_Results.xlsx` (pandas + openpyxl): `Summary` (one row per file), `Transitions` (one row per event), `Features`, `Regimes`, `Quality & Metadata` (warnings, errors, columns and reasoning, hashes, settings, algorithm version). Empty sheets keep their headers.
+- **CSV** of each sheet; a **ZIP** of per-file PNG plots; a Markdown **batch report**; per-file plot, analysis JSON and events CSV.
+
 ---
 
 ## 7. Frontend Architecture & Interactive Experience
@@ -422,11 +499,11 @@ When multiple files are uploaded together:
   - Interactive parameter controls embedded directly inside explanatory sentences.
 
 ### 7.2 Component Tree & View Routing
-Navigation relies on standard URL hash routing (`#traces`, `#inverse`, `#forward`, `#inflect`):
+Navigation relies on standard URL hash routing (`#inflect` — the default —, `#traces`, `#inverse`, `#forward`, `#docs`):
 
 ```
 App.tsx
-├── Navigation Bar (Links: 1. Force traces, 2. Inverse problem, 3. Forward model, 4. Inflect)
+├── Navigation Bar (Links: Inflect, Force Traces, Inverse Model, Forward Model, Docs)
 ├── ErrorBoundary
 │   ├── [#traces]  TracesPage
 │   │   ├── StatusStrip (Run, Resume, Redo buttons + progress bar)
@@ -452,18 +529,46 @@ App.tsx
 │   │   ├── Distribution Canvas (P(ξ, t) evolving on tilted potential)
 │   │   └── Comparison Plot (Forward first-passage density vs. MD histogram)
 │   │
-│   └── [#inflect] InflectPage
-│       ├── Intake (File dropzone, sample loader)
-│       ├── Columns (Semantic column classifier cards, axis chooser)
-│       ├── Stage (Interactive SVG chart with animated annotation marks)
-│       ├── Narration (Beat stepper rail, interactive slot inputs)
-│       ├── Chorus (Multi-curve overlay, transition alignment toggle)
-│       ├── Ensemble (Cohort statistics, MAD outlier cards)
-│       ├── Confidence (95% bootstrap intervals, 16-setting stability strip)
-│       ├── Ledger (Tiered scientific findings table, user notes)
-│       ├── Export (SVG, CSV, and publication-ready Methods text)
-│       └── Record (SHA256 reproducible integrity check)
+│   ├── [#inflect] InflectWorkspace (default route; see 7.4)
+│   │   ├── BatchWorkspace → BatchUpload, BatchResults (Summary, Files, Plots, Histograms, Export)
+│   │   └── InflectPage (the guided single-file reader):
+│   │       ├── Intake (File dropzone, sample loader)
+│   │       ├── Columns (Semantic column classifier cards, axis chooser)
+│   │       ├── Stage (Interactive SVG chart with animated annotation marks)
+│   │       ├── Narration (Beat stepper rail, interactive slot inputs)
+│   │       ├── Chorus (Multi-curve overlay, transition alignment toggle)
+│   │       ├── Ensemble (Cohort statistics, MAD outlier cards)
+│   │       ├── Confidence (95% bootstrap intervals, 16-setting stability strip)
+│   │       ├── Ledger (Tiered scientific findings table, user notes)
+│   │       ├── Export (SVG, CSV, and publication-ready Methods text)
+│   │       └── Record (SHA256 reproducible integrity check)
+│   │
+│   └── [#docs] DocsPage (14 sections, searchable)
 ```
+
+### 7.4 The Inflect Landing Page, Batch Workspace and Docs
+Inflect is the **default route**: opening the app with no hash, or an unknown one, shows Inflect and rewrites the address to `#inflect` (no extra history entry). Navigation order: **Inflect · Force Traces · Inverse Model · Forward Model · Docs**; V1–V3 keep their direct URLs.
+
+```
+[#inflect] InflectWorkspace            (mode toggle: Batch analysis | Guided reader)
+├── Batch analysis (default)
+│   BatchWorkspace                      (remembers the batch id; polls while running)
+│   ├── BatchUpload                     (drop files/folders, pickers, queue, validation, settings)
+│   └── BatchResults
+│       ├── BatchSummary                (counts, progress, status, resume / stop)
+│       ├── [Files]      BatchFileTable (search, sort, filter, paging) + BatchFileDetail
+│       ├── [Plots]      BatchPlots     (overlay, each file, compare events, cohort)
+│       ├── [Histograms] BatchHistograms (each file; all files together; normalized option)
+│       └── [Export]     downloads (xlsx, csv, zip, report)
+└── Guided reader                       (the original single-file InflectPage, unchanged)
+
+[#docs] DocsPage                        (14 sections, full-text search with highlighting)
+```
+
+- **Upload** supports drag-and-drop of files *and folders* (`webkitGetAsEntry` traversal), a file picker and a folder picker (`webkitdirectory`, relative paths kept), a queue with per-file validation and removal, totals, and detection settings. Nothing is sent until "Analyse".
+- **Plots** use one shared line chart (`LineChart`: scroll-zoom, drag-pan, nearest-point tooltip, reset) with a consistent colour per file. Overlay and cohort views only combine compatible files; the cohort reuses `chorus.py` / `ensemble.py`. Curves are display copies thinned to keep extremes; every number comes from full-resolution data.
+- **Docs** has a sticky search bar: it scans the rendered text, jumps to the first match, highlights all matches with the CSS Custom Highlight API (nothing is rewritten), and offers a result list, `↑ ↓` / Enter stepping and per-section match badges.
+- Shared helpers live in `batchUtils.ts` (colours, `useFetched` — a keyed fetch hook that avoids set-state-in-effect patterns).
 
 ---
 
@@ -518,12 +623,32 @@ Here is what happens step-by-step when a user interacts with the system:
 - **Modifying Settings**: When the user edits a parameter (such as segment count $k$ or the force-rate window $W$), the frontend submits the change to the API, which re-evaluates the $\mathcal{O}(1)$ prefix moment fits in milliseconds without reloading the raw data.
 - **Reproducibility Verification**: Clicking **Verify integrity** triggers `POST /api/inflect/sessions/{id}/verify`. The backend recomputes the SHA256 hashes of the source data, pipeline code, and output tables, reporting whether the analysis matches the archived record.
 
+### 8.3 Batch Flow: Many Files, One Collection
+```
+[User drops N files or a folder]  →  queue (validation, remove, add more)  →  [Analyse]
+       │
+       ▼
+[POST /api/inflect/batches]   hash every file, store sources, record statuses
+       │                      (same set again → the existing batch is returned)
+       ▼
+[runner: bounded workers]     per file: ingest → columns → segment → measure → ledger → save
+       │                      one failure never stops the others; results saved immediately
+       ▼
+[UI polls GET /batches/{id}/files]   progress, per-file status, counts
+       │
+       ├── Files tab       table of every file → click for features, events, regimes, warnings
+       ├── Plots tab       overlay / each file / compare events / cohort (compatible files only)
+       ├── Histograms tab  per-file and cross-file, on request, counts or normalized
+       └── Export tab      xlsx / csv / zip / report — every file included, failures too
+```
+After a refresh or a server restart the batch is reopened from its saved manifest; "resume analysis" completes only what is unfinished or changed.
+
 ---
 
 ## 9. Validation, Test Suite & How to Run
 
-### 9.1 Test Battery (210 Passing Tests)
-The backend contains a test suite of 210 automated tests verifying physics identities, numerical solvers, and data analysis pipelines:
+### 9.1 Test Battery (256 Passing Tests)
+The backend contains 256 automated tests (the original 210 plus 46 for batches, scientific checks, scale and histograms) verifying physics identities, numerical solvers, data analysis pipelines and the batch platform:
 
 ```bash
 cd backend
@@ -544,13 +669,14 @@ Test suite coverage:
 - `test_inflect_uncertainty.py`: Tests moving-block bootstrap and 16-setting parameter stability sweeps.
 - `test_inflect_ledger.py`: Tests tiered findings classification, note attachment, and hash audit records.
 - `test_inflect_api.py`: Tests all FastAPI Inflect REST endpoints.
+- `test_inflect_batch.py` (46 tests, each in a temporary artifacts directory): batch creation, unique ids, hashes, duplicate names and contents, folder paths (traversal-safe), unsupported/empty/corrupt/oversize files, limits; independent analysis and the full result schema; step (up/down), knee, peak and multiple-event detection; manual detector selection; flat, noise-only, correlated-noise and tiny files; NaN/inf/non-monotonic x; per-file delimiters and column names; failure isolation; status derivation; resume, cancel-then-resume and interrupted-file recovery; 150-file and 100 000-row cases; simultaneous batches; plots grouping and downsampling; Excel/CSV/ZIP/report completeness including failed files; peak/onset accuracy and bootstrap honesty; and the per-file and cross-file histograms.
 
-*Status: 210 passed, 0 failures.*
+*Status: 256 passed, 0 failures.* Frontend checks: `npx tsc -b`, `npm run build`, `npx oxlint src` (the new files are warning-free).
 
 ### 9.2 Execution Instructions
 
 #### 1. Backend Server
-Requirements: Python 3.11+ with NumPy, SciPy, pandas, matplotlib, FastAPI, uvicorn.
+Requirements: Python 3.11+ (developed on 3.12) with NumPy, SciPy, pandas, matplotlib, FastAPI, uvicorn, python-multipart and openpyxl (all in `requirements.txt`).
 ```bash
 cd backend
 pip install -r requirements.txt
@@ -559,22 +685,41 @@ python -m tini serve
 - API server: `http://localhost:8000`
 - Interactive API documentation: `http://localhost:8000/docs`
 - Headless pipeline execution: `python -m tini run`
+- Optional environment variables: `TINI_DATA_DIR`, `TINI_ARTIFACTS_DIR`, `TINI_BATCH_MAX_FILES`, `TINI_BATCH_MAX_FILE_BYTES`, `TINI_BATCH_MAX_TOTAL_BYTES`, `TINI_BATCH_MAX_ROWS`, `TINI_BATCH_WORKERS`.
 
 #### 2. Frontend Application
-Requirements: Node.js 18+ and npm.
+Requirements: Node.js 22 (developed on v22.13) and npm.
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-- Application URL: `http://localhost:5173`
+- Application URL: `http://localhost:5173` (opens Inflect)
 - Direct section navigation:
+  - `http://localhost:5173/#inflect` $\to$ Version 4 Inflect (default landing page; batch analysis)
   - `http://localhost:5173/#traces` $\to$ Version 1 Dashboard
   - `http://localhost:5173/#inverse` $\to$ Version 2 Inverse Model
   - `http://localhost:5173/#forward` $\to$ Version 3 Forward Smoluchowski Model
-  - `http://localhost:5173/#inflect` $\to$ Version 4 Inflect Universal Engine
+  - `http://localhost:5173/#docs` $\to$ In-application technical documentation
 
 ---
 
-*Report generated for the TiNi Research Platform & Inflect Engine codebase.*
+## 10. Deployment Notes (Render Free Tier Audit)
+Deploying to Render's free tier is **feasible for a demo, not for production use**; no code changes are required.
+
+| Area | Finding |
+|---|---|
+| Backend start | `python -m tini serve` binds `127.0.0.1`, which Render cannot reach. Use `uvicorn tini.api:app --host 0.0.0.0 --port $PORT` (root directory `backend`). |
+| Frontend → API | Calls are relative (`/api/...`), proxied only by Vite in development. On a Render static site add a *Rewrite* rule `/api/*` → `https://<backend>.onrender.com/api/*`; CORS is then not needed (it is hard-coded to localhost). |
+| Disk | Free web services have no persistent disk: batches, uploads, results and `traces.npz` are lost on redeploy and spin-down, so resume-after-refresh only works while the instance is warm. |
+| Resources | 512 MB RAM and about 0.1 vCPU: reduce limits (`TINI_BATCH_WORKERS=1`, `TINI_BATCH_MAX_FILE_BYTES=10485760`, `TINI_BATCH_MAX_TOTAL_BYTES=52428800`, `TINI_BATCH_MAX_FILES=200`, `TINI_BATCH_MAX_ROWS=200000`); V2 bootstrap and V3 PDE runs will be very slow. |
+| Idle | The service sleeps after about 15 minutes; the first request then takes about a minute. |
+| Environment | Pin `PYTHON_VERSION=3.12.5` (backend) and `NODE_VERSION=22` (static site). |
+| Data | The 100 V1 traces are in git; the Inflect sample set is git-ignored, so its button is absent. V1 needs its pipeline run once per cold start. |
+
+A paid instance with a persistent disk (set `TINI_ARTIFACTS_DIR` to the mount) or external storage removes the disk limitation.
+
+---
+
+*Report generated for the TiNi Research Platform & Inflect Engine codebase. Last updated 2026-11-21 (Inflect 4.3: batch analysis, histograms, exports, Docs search).*
 
