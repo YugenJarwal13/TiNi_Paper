@@ -776,3 +776,60 @@ export const batches = {
   fileJsonUrl: (id: string, fileId: string) => `${BASE}/batches/${id}/files/${fileId}/analysis.json`,
   fileTransitionsUrl: (id: string, fileId: string) => `${BASE}/batches/${id}/files/${fileId}/transitions.csv`,
 }
+
+
+// ================================================================ histograms
+export type HistogramData = {
+  n: number
+  n_total: number
+  n_outside: number
+  mean: number
+  median: number
+  std: number
+  min: number
+  max: number
+  constant: boolean
+  value?: number
+  counts: number[]
+  edges: number[]
+}
+
+export type FileHistograms = {
+  file_id: string
+  filename: string
+  relative_path: string
+  status: BatchFileStatus
+  columns: { x: string; y: string; x_unit: string | null; y_unit: string | null } | null
+  histograms: {
+    values: HistogramData | null
+    increments: HistogramData | null
+    residuals: HistogramData | null
+    spacing: HistogramData | null
+  } | null
+  stale: boolean
+}
+
+export type CrossMeasure = {
+  key: 'peak_value' | 'peak_position' | 'step_size' | 'transition_position'
+  label: string
+  subtitle: string
+  axis: string
+  n_files: number
+  n_values: number
+  n_without: number
+  histogram: HistogramData | null
+}
+
+export type CrossHistograms = {
+  groups: PlotGroup[]
+  group: string | null
+  n_in_group: number
+  n_stale: number
+  measures: CrossMeasure[]
+  incompatible_explanation: string | null
+}
+
+export const batchHistograms = {
+  files: (id: string, ids: string[]) => get<{ files: FileHistograms[] }>(`/batches/${id}/histograms/files`, { ids: ids.join(',') }),
+  cross: (id: string, group?: string) => get<CrossHistograms>(`/batches/${id}/histograms/cross`, { group }),
+}

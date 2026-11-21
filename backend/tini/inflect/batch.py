@@ -52,7 +52,7 @@ from .segment import MIN_SEGMENT_POINTS, model_curve, prepare, segment_curve
 from .sessions import decimate
 from .transitions import read_curve
 
-ALGORITHM_VERSION = "4.2-batch"
+ALGORITHM_VERSION = "4.3-batch"
 SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".dat", ".txt", ".tab", ".asc", ".prn", ".out"}
 STORED_CURVE_POINTS = 1200
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
@@ -270,6 +270,44 @@ def _slope_stats(x: np.ndarray, y: np.ndarray) -> dict[str, float | None]:
         "minimum_slope": float(d.min()) if d.size else None,
     }
 
+
+
+def histogram_of(values: Any, clip: bool = False, cross: bool = False) -> dict[str, Any] | None:
+    """Counts and edges for a histogram, computed from the full-resolution values.
+
+    ``clip`` (for increments and residuals, where one step can dwarf the noise)
+    draws the bins over the 0.5th-99.5th percentile range and *reports* how many
+    values lie outside it, so the bulk is readable and nothing is hidden.
+    ``cross`` uses few bins (one value per file, so n is small).
+    Identical values give a single bar flagged ``constant``.
+    """
+    v = np.asarray(values, dtype=float)
+    v = v[np.isfinite(v)]
+    n_total = int(v.size)
+    if n_total == 0:
+        return None
+    mean, sd = float(v.mean()), float(v.std())
+    median = float(np.median(v))
+    n_outside = 0
+    if clip and n_total >= 20:
+        a, b = np.percentile(v, [0.5, 99.5])
+        if b > a:
+            keep = (v >= a) & (v <= b)
+            n_outside = int((~keep).sum())
+            v = v[keep]
+    lo, hi = float(v.min()), float(v.max())
+    scale = max(abs(lo), abs(hi))
+    base = {"n": int(v.size), "n_total": n_total, "n_outside": n_outside,
+            "mean": mean, "median": median, "std": sd, "min": lo, "max": hi}
+    if hi - lo <= 1e-6 * scale:
+        half = 0.05 * scale if scale > 0 else 0.5
+        return {**base, "constant": True, "value": lo, "counts": [int(v.size)], "edges": [lo - half, hi + half]}
+    if cross:
+        nb = int(np.clip(len(np.histogram_bin_edges(v, "auto")) - 1, 4, 20))
+    else:
+        nb = int(np.clip(np.ceil(np.sqrt(v.size)), 8, 40))
+    counts, edges = np.histogram(v, bins=nb, range=(lo, hi))
+    return {**base, "constant": False, "counts": [int(c) for c in counts], "edges": [float(e) for e in edges]}
 
 # ----------------------------------------------------- the one-file analysis
 def analyse_file(path: Path, filename: str, s: BatchSettings, limits: BatchLimits,
@@ -510,6 +548,23 @@ def analyse_file(path: Path, filename: str, s: BatchSettings, limits: BatchLimit
             "curvature": g.curvature,
         })
 
+    # --- histograms (computed here, from the full-resolution data) ---------
+    steps = [t for t in transitions if t["type"] == "step"]
+    main_step = max(steps, key=lambda t: abs(t["magnitude"] or 0), default=None)
+    k_peak = int(np.argmax(ys))
+    histograms = {
+        "values": histogram_of(ys),
+        "increments": histogram_of(np.diff(ys), clip=True),
+        "residuals": histogram_of(resid, clip=True),
+        "spacing": histogram_of(np.diff(xs)),
+        # one number per file: what the cross-file histograms are made of
+        "scalars": {
+            "peak_value": float(ys[k_peak]), "peak_position": float(xs[k_peak]),
+            "step_size": main_step["magnitude"] if main_step else None,
+            "transition_position": main_step["onset_x"] if main_step else None,
+        },
+    }
+
     # --- narration, findings, ensemble summary ----------------------------
     reading = None
     try:
@@ -534,6 +589,7 @@ def analyse_file(path: Path, filename: str, s: BatchSettings, limits: BatchLimit
             "headline": rep.headline, "x_scale": s.x_scale,
         },
         "features": features,
+        "histograms": histograms,
         "transitions": transitions,
         "regimes": regimes,
         "findings": findings,
@@ -1037,4 +1093,60 @@ def build_plots(batch: Batch, group: str | None = None, max_points: int = 600,
         "x_unit": chosen["x_unit"] if chosen else None, "y_unit": chosen["y_unit"] if chosen else None,
         "display_note": f"curves are drawn from a display copy thinned to at most {max_points} points that keeps "
                         f"local extremes; all measurements use the full-resolution data",
+    })
+
+
+# -------------------------------------------------------------- histograms
+CROSS_MEASURES = [
+    ("peak_value", "Peak value", "critical force: the maximum of y in each file", "y"),
+    ("peak_position", "Peak position", "snap time: where that maximum occurs", "x"),
+    ("step_size", "Step size", "height of the main step (negative = a drop)", "y"),
+    ("transition_position", "Transition position", "where the main step begins", "x"),
+]
+
+
+def file_histograms(batch: Batch, ids: list[str]) -> list[dict[str, Any]]:
+    """The four within-file histograms of each requested file."""
+    files = {f["file_id"]: f for f in batch.manifest()["files"]}
+    out = []
+    for fid in ids:
+        rec = files.get(fid)
+        if rec is None:
+            continue
+        a = batch.analysis(fid) if rec["status"] == "completed" else None
+        ok = bool(a and a.get("status") == "completed")
+        out.append({
+            "file_id": fid, "filename": rec["filename"], "relative_path": rec["relative_path"], "status": rec["status"],
+            "columns": ({k: a["columns"].get(k) for k in ("x", "y", "x_unit", "y_unit")} if ok else None),
+            "histograms": a.get("histograms") if ok else None,
+            # completed under an older version: the histograms appear after the batch is analysed again
+            "stale": bool(ok and a.get("histograms") is None),
+        })
+    return json_safe(out)
+
+
+def build_cross_histograms(batch: Batch, group: str | None = None) -> dict[str, Any]:
+    """One number per file, histogrammed across the files of one compatible group."""
+    analyses = completed_analyses(batch)
+    groups = compatibility_groups(analyses)
+    chosen = next((g for g in groups if g["key"] == group), groups[0] if groups else None)
+    members = [a for a in analyses if chosen and a["file_id"] in chosen["file_ids"]]
+    usable = [a for a in members if a.get("histograms")]
+    measures = []
+    for key, label, subtitle, axis in CROSS_MEASURES:
+        vals = [a["histograms"]["scalars"].get(key) for a in usable]
+        vals = [v for v in vals if v is not None]
+        unit = chosen["x_unit"] if axis == "x" else chosen["y_unit"] if chosen else None
+        name = chosen["x"] if axis == "x" else chosen["y"] if chosen else ""
+        measures.append({
+            "key": key, "label": label, "subtitle": subtitle, "axis": f"{name} [{unit}]" if unit else name,
+            "n_files": len(usable), "n_values": len(vals), "n_without": len(usable) - len(vals),
+            "histogram": histogram_of(vals, cross=True) if len(vals) >= 2 else None,
+        })
+    return json_safe({
+        "groups": groups, "group": chosen["key"] if chosen else None,
+        "n_in_group": len(members), "n_stale": len(members) - len(usable), "measures": measures,
+        "incompatible_explanation": ("These files do not share the same x/y variables and units, so one histogram "
+                                     "cannot mix them. Choose a group; each file is still shown on its own.")
+        if len(groups) > 1 else None,
     })

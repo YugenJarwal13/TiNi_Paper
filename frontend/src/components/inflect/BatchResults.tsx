@@ -8,11 +8,12 @@ import { useCallback, useMemo, useState } from 'react'
 import { batches, type BatchFileRecord, type BatchInfo } from '../../api/inflect'
 import { BatchFileDetail } from './BatchFileDetail'
 import { BatchFileTable } from './BatchFileTable'
+import { BatchHistograms } from './BatchHistograms'
 import { BatchPlots } from './BatchPlots'
 import { fileColor } from './batchUtils'
 import { BatchSummary } from './BatchSummary'
 
-type Tab = 'files' | 'plots' | 'export'
+type Tab = 'files' | 'plots' | 'histograms' | 'export'
 
 export function BatchResults({
   info, files, onResume, onCancel, onNew, busy,
@@ -47,7 +48,7 @@ export function BatchResults({
       <BatchSummary info={info} onResume={onResume} onCancel={onCancel} busy={busy} />
       <div className="br__tabs">
         <div className="seg" role="tablist">
-          {([['files', 'Files'], ['plots', 'Plots'], ['export', 'Export']] as [Tab, string][]).map(([k, label]) => (
+          {([['files', 'Files'], ['plots', 'Plots'], ['histograms', 'Histograms'], ['export', 'Export']] as [Tab, string][]).map(([k, label]) => (
             <button key={k} role="tab" aria-selected={tab === k} className={`seg__btn ${tab === k ? 'is-on' : ''}`} onClick={() => setTab(k)}>{label}</button>
           ))}
         </div>
@@ -61,6 +62,7 @@ export function BatchResults({
         </>
       )}
       {tab === 'plots' && <BatchPlots batchId={info.id} files={files} colorOf={colorOf} onOpenFile={open} version={version} />}
+      {tab === 'histograms' && <BatchHistograms batchId={info.id} files={files} colorOf={colorOf} version={version} />}
       {tab === 'export' && <ExportPanel info={info} />}
     </div>
   )

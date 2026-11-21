@@ -548,3 +548,93 @@ def test_cancel_then_resume_finishes_every_file(client, monkeypatch):
     assert m["counts"]["completed"] == 24
     after = {f["file_id"]: f["updated_at"] for f in client.get(f"/api/inflect/batches/{r['id']}/files").json()["files"]}
     assert all(after[k] == v for k, v in stamps.items())                               # finished files were not redone
+
+
+# ============================================================== histograms
+def test_each_file_gets_four_histograms_from_its_full_data(client):
+    r = create(client, [("a.csv", table(step_y(0, 6.0))), ("b.csv", table(step_y(1, 4.0)))])
+    wait(client, r["id"])
+    out = client.get(f"/api/inflect/batches/{r['id']}/histograms/files", params={"ids": "file_0001,file_0002"}).json()["files"]
+    assert [f["file_id"] for f in out] == ["file_0001", "file_0002"]
+    for f in out:
+        h = f["histograms"]
+        assert set(h) >= {"values", "increments", "residuals", "spacing"}
+        assert sum(h["values"]["counts"]) == h["values"]["n"] == 500           # every value counted
+        assert len(h["values"]["edges"]) == len(h["values"]["counts"]) + 1
+        assert h["spacing"]["constant"] is True and h["spacing"]["counts"] == [499]
+        # the step is one huge increment: it is reported as outside the drawn range, not hidden
+        assert h["increments"]["n_outside"] >= 1
+        assert h["increments"]["n"] + h["increments"]["n_outside"] == h["increments"]["n_total"] == 499
+        assert h["residuals"]["n"] + h["residuals"]["n_outside"] == 500
+        assert f["columns"]["x"] == "t"
+
+
+def test_cross_file_histograms_hold_one_number_per_file(client):
+    ats = [3.0, 3.5, 4.0, 4.5, 5.0, 5.5]
+    r = create(client, [(f"s{i}.csv", table(step_y(i, at))) for i, at in enumerate(ats)])
+    wait(client, r["id"])
+    c = client.get(f"/api/inflect/batches/{r['id']}/histograms/cross").json()
+    assert [m["key"] for m in c["measures"]] == ["peak_value", "peak_position", "step_size", "transition_position"]
+    assert c["n_in_group"] == 6 and c["n_stale"] == 0
+    pos = next(m for m in c["measures"] if m["key"] == "transition_position")
+    assert pos["n_values"] == 6 and sum(pos["histogram"]["counts"]) == 6
+    assert pos["histogram"]["min"] == pytest.approx(min(ats), abs=0.2) and pos["histogram"]["max"] == pytest.approx(max(ats), abs=0.2)
+    step = next(m for m in c["measures"] if m["key"] == "step_size")
+    assert step["histogram"]["median"] > 0                                   # these steps all go up
+    peak = next(m for m in c["measures"] if m["key"] == "peak_value")
+    a = analysis(client, r["id"], "file_0001")
+    assert peak["histogram"]["n"] == 6 and a["histograms"]["scalars"]["peak_value"] == pytest.approx(a["features"]["y_max"])
+
+
+def test_one_file_has_no_cross_file_histogram_and_files_without_a_step_are_counted(client):
+    r = create(client, [("only.csv", table(step_y()))])
+    wait(client, r["id"])
+    c = client.get(f"/api/inflect/batches/{r['id']}/histograms/cross").json()
+    assert all(m["histogram"] is None for m in c["measures"])                # needs at least two values
+    r = create(client, [("a.csv", table(step_y(0))), ("b.csv", table(step_y(1, 4.0))),
+                        ("flat.csv", table(np.full(500, 2.0)))])
+    wait(client, r["id"])
+    c = client.get(f"/api/inflect/batches/{r['id']}/histograms/cross").json()
+    pos = next(m for m in c["measures"] if m["key"] == "transition_position")
+    assert pos["n_values"] == 2 and pos["n_without"] == 1                    # the flat file has no step to measure
+
+
+def test_cross_file_histograms_never_mix_incompatible_files(client):
+    r = create(client, [("a.csv", table(step_y(0))), ("b.csv", table(step_y(1))), ("c.csv", table(step_y(2))),
+                        ("o.csv", table(step_y(3), header="time [s],force [pN]"))])
+    wait(client, r["id"])
+    c = client.get(f"/api/inflect/batches/{r['id']}/histograms/cross").json()
+    assert len(c["groups"]) == 2 and c["n_in_group"] == 3 and c["incompatible_explanation"]
+    other = client.get(f"/api/inflect/batches/{r['id']}/histograms/cross", params={"group": c["groups"][1]["key"]}).json()
+    assert other["n_in_group"] == 1
+
+
+def test_histogram_endpoints_handle_failed_old_and_bad_requests(client):
+    r = create(client, [("a.csv", table(step_y())), ("empty.csv", b"")])
+    wait(client, r["id"])
+    out = client.get(f"/api/inflect/batches/{r['id']}/histograms/files", params={"ids": "file_0001,file_0002,file_9999"}).json()["files"]
+    assert [f["file_id"] for f in out] == ["file_0001", "file_0002"]         # unknown ids are ignored
+    assert out[1]["histograms"] is None and out[1]["status"] == "failed"
+    # a result saved by an older version has no histograms: reported as stale, not as an error
+    b = ib.Batch(api.settings, r["id"])
+    a = b.analysis("file_0001")
+    del a["histograms"]
+    from tini.io_atomic import atomic_write_json
+    atomic_write_json(b.file_dir("file_0001") / "analysis.json", a)
+    out = client.get(f"/api/inflect/batches/{r['id']}/histograms/files", params={"ids": "file_0001"}).json()["files"]
+    assert out[0]["stale"] is True and out[0]["histograms"] is None
+    assert client.get(f"/api/inflect/batches/{r['id']}/histograms/files", params={"ids": ",".join(f"f{i}" for i in range(30))}).status_code == 400
+    assert client.get("/api/inflect/batches/nope/histograms/cross").status_code == 404
+
+
+def test_histogram_helper_edge_cases():
+    assert ib.histogram_of([]) is None and ib.histogram_of([np.nan, np.inf]) is None
+    h = ib.histogram_of([3.0, 3.0, 3.0])
+    assert h["constant"] and h["counts"] == [3] and h["edges"][0] < 3.0 < h["edges"][1]
+    h = ib.histogram_of(np.r_[np.zeros(200), 1e6], clip=True)               # no percentile range to draw: nothing clipped
+    assert h["n_outside"] == 0 and sum(h["counts"]) == 201
+    h = ib.histogram_of(np.r_[np.random.default_rng(1).normal(size=300), 500.0], clip=True)   # a real outlier
+    assert h["n_outside"] >= 1 and h["n"] + h["n_outside"] == h["n_total"] == 301
+    h = ib.histogram_of(np.random.default_rng(0).normal(size=1000))
+    assert sum(h["counts"]) == 1000 and 8 <= len(h["counts"]) <= 40
+    assert 4 <= len(ib.histogram_of([1, 2, 3, 4, 5, 9], cross=True)["counts"]) <= 20

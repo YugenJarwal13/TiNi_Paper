@@ -6,12 +6,12 @@
  * against the repository (`python -m tini serve`, `npm run dev`, `pytest`).
  */
 
-import { useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 const PROJECT = {
   name: 'TiNi Research Platform & Inflect Engine',
-  version: '4.2 (batch analysis)',
-  updated: '2026-11-10',
+  version: '4.3 (batch analysis and histograms)',
+  updated: '2026-11-21',
   developers: ['Yugen Jarwal', 'Sai Sharath Koppu', 'Kritavya Patel'],
 }
 
@@ -44,6 +44,8 @@ const API: { method: string; route: string; purpose: string; request: string; re
   { method: 'POST', route: '/api/inflect/batches/{id}/analyse', purpose: 'Start or resume analysis. Unchanged finished files are not recomputed.', request: 'JSON (optional): { settings, file_overrides, file_ids, force }', response: '{ started, batch }', errors: '400 bad settings; 404; 409 already running' },
   { method: 'POST', route: '/api/inflect/batches/{id}/cancel', purpose: 'Stop after the files currently in progress.', request: '—', response: 'BatchInfo', errors: '404' },
   { method: 'GET', route: '/api/inflect/batches/{id}/plots', purpose: 'Combined plotting data for one compatible group.', request: 'query: group, max_points (50–3000), ids (comma list), max_curves', response: '{ groups[], curves[], cohort, transitions[], display_note, … }', errors: '404' },
+  { method: 'GET', route: '/api/inflect/batches/{id}/histograms/files', purpose: 'The four within-file histograms (values, increments, residuals, spacing) of the files named in ids.', request: 'query: ids (comma list, 1–24 file ids)', response: '{ files: [{ file_id, columns, histograms: { values, increments, residuals, spacing }, stale }] }; each histogram has counts, edges, n, n_outside, median', errors: '400 bad ids; 404 unknown batch' },
+  { method: 'GET', route: '/api/inflect/batches/{id}/histograms/cross', purpose: 'Cross-file histograms: peak value, peak position, step size, transition position (one number per file).', request: 'query: group (a compatible group, default the largest)', response: '{ groups, group, n_in_group, n_stale, measures: [{ key, label, axis, n_values, n_without, histogram }] }', errors: '404 unknown batch' },
   { method: 'GET', route: '/api/inflect/batches/{id}/export', purpose: 'The Excel workbook Inflect_Batch_Results.xlsx.', request: '—', response: 'xlsx download', errors: '404' },
   { method: 'GET', route: '/api/inflect/batches/{id}/export/{kind}.csv', purpose: 'CSV of one table: summary, transitions, features, regimes, quality.', request: '—', response: 'csv download', errors: '400 unknown kind; 404' },
   { method: 'GET', route: '/api/inflect/batches/{id}/export/plots.zip', purpose: 'One PNG per completed file.', request: '—', response: 'zip download', errors: '404' },
@@ -199,6 +201,7 @@ cd frontend && npm run build            # type check + production build`}</Code>
           <li><b>Read the results.</b> The table lists every file. Search, sort and filter; click a row for the detail view: plot, events, regimes, features, provenance and findings.</li>
           <li><b>Events.</b> Each has a type (step, knee, peak, valley), onset (x, y), settled point (steps only), magnitude, direction, the detector’s settings and its evidence. “Confidence: not computed” means no bootstrap was run — it is never filled in otherwise.</li>
           <li><b>Plots.</b> <em>Overlay</em> draws compatible curves together (click legend entries to hide; scroll to zoom; drag to pan; align on onset). <em>Each file</em> gives one plot per file. <em>Compare events</em> plots onset, magnitude and more across files. <em>Cohort</em> shows the median curve, interquartile ribbon and outliers.</li>
+          <li><b>Histograms.</b> The Histograms tab sits beside Plots and draws nothing until you ask. Under “Each file” answer “Do you want to see the histogram for this?” to get four histograms per file (its values, the change between points, the residuals around the fit, and the spacing of the axis). Under “All files together” the same question gives histograms of one number per file — peak value (critical force), peak position (snap time), step size and transition position — across the files; it needs at least two analysed files and only pools files that share variables and units. In each, “Do you want to see normalized histogram for this?” switches counts to density (the bars then have unit area).</li>
           <li><b>Export.</b> The Export tab downloads the Excel workbook, CSVs, a plots ZIP and a report.</li>
         </ol>
         <p><b>Incompatible files.</b> Files with different variables or units are never overlaid. The page names the groups and lets you pick one; every file is still plotted individually.</p>
@@ -371,7 +374,7 @@ GET  .../export/bogus.csv                         -> 400 {"detail": "kind must b
         ['backend/tests/', 'pytest suites (test_inflect_batch.py for batches).'],
         ['frontend/src/App.tsx', 'Hash router and navigation.'],
         ['frontend/src/api/inflect.ts', 'Typed client for Inflect, including batches.'],
-        ['frontend/src/components/inflect/', 'Inflect UI: Batch*.tsx (upload, results, plots, detail), the guided reader.'],
+        ['frontend/src/components/inflect/', 'Inflect UI: Batch*.tsx (upload, results, plots, histograms, detail), the guided reader.'],
         ['frontend/src/components/docs/DocsPage.tsx', 'This page.'],
         ['frontend/src/styles/', 'tokens.css (design tokens), global.css, inflect.css, batch.css.'],
         ['artifacts/', 'Generated results (batches under artifacts/inflect/batches/). Mostly git-ignored.'],
@@ -402,6 +405,8 @@ GET  .../export/bogus.csv                         -> 400 {"detail": "kind must b
         ['409 “already being analysed”', 'A run is in progress. Wait, or stop it with POST …/cancel, then resume.'],
         ['Files appear skipped', 'Unsupported extension, or “skip duplicates” was on and the content matched an earlier file. Rename to a supported extension or untick the option and press resume.'],
         ['Upload works but nothing happens', 'A batch in status “created” needs “start analysis”. Otherwise check the backend console; runner errors are also written to the batch’s logs/ folder.'],
+        ['Histograms say a file was analysed by an older version', 'Results saved before histograms existed have none. Open the batch and press “resume analysis”; changed-version files are recomputed.'],
+        ['Cross-file histogram is missing', 'It needs at least two analysed files in one comparison group; files with different variables or units are in other groups (use the group selector). Files without a step are left out of the step histograms and counted.'],
         ['Test failures', 'Run cd backend && python -m pytest -x. Batch tests write to a temporary artifacts directory, other suites use artifacts/.'],
       ]} />
     ),
@@ -456,18 +461,114 @@ python -m pytest tests/test_inflect_batch.py  # batches and exports`}</Code>
   },
 ]
 
+// ------------------------------------------------------------------ search
+type Hit = { node: Text; start: number; end: number; section: string; before: string; match: string; after: string }
+
+/** Every occurrence of `needle` in the rendered text of `root`, in reading order. */
+function scan(root: HTMLElement, needle: string): Hit[] {
+  const lower = needle.toLowerCase()
+  const out: Hit[] = []
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  for (let n = walker.nextNode(); n && out.length < 500; n = walker.nextNode()) {
+    const text = n.textContent ?? ''
+    const low = text.toLowerCase()
+    const section = (n.parentElement?.closest('[data-doc-section]') as HTMLElement | null)?.dataset.docSection ?? ''
+    for (let i = low.indexOf(lower); i !== -1 && out.length < 500; i = low.indexOf(lower, i + lower.length)) {
+      out.push({
+        node: n as Text, start: i, end: i + lower.length, section,
+        before: text.slice(Math.max(0, i - 36), i), match: text.slice(i, i + lower.length), after: text.slice(i + lower.length, i + lower.length + 56),
+      })
+    }
+  }
+  return out
+}
+
+type HighlightRegistry = { set: (k: string, v: unknown) => void; delete: (k: string) => void }
+const registry = (): HighlightRegistry | null =>
+  typeof CSS !== 'undefined' ? ((CSS as unknown as { highlights?: HighlightRegistry }).highlights ?? null) : null
+const HighlightCtor = (): (new (...r: Range[]) => unknown) | null =>
+  (window as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight ?? null
+
+function rangeOf(h: Hit): Range {
+  const r = document.createRange()
+  r.setStart(h.node, h.start)
+  r.setEnd(h.node, h.end)
+  return r
+}
+
 export function DocsPage() {
   const [q, setQ] = useState('')
+  const [hits, setHits] = useState<Hit[]>([])
+  const [cur, setCur] = useState(0)
+  const [open, setOpen] = useState(false)
   const [active, setActive] = useState(SECTIONS[0].id)
-  const shown = useMemo(() => {
-    const n = q.trim().toLowerCase()
-    return n ? SECTIONS.filter((s) => `${s.title} ${s.keywords}`.toLowerCase().includes(n)) : SECTIONS
-  }, [q])
+  const main = useRef<HTMLElement>(null)
+  const needle = q.trim()
 
-  const go = (id: string) => {
+  const scrollTo = useCallback((el: Element | Range) => {
+    const top = el.getBoundingClientRect().top + window.scrollY - 150
+    window.scrollTo({ top: Math.max(0, top), behavior: 'instant' })
+  }, [])
+
+  const jump = useCallback((list: Hit[], i: number) => {
+    if (!list.length) return
+    const k = ((i % list.length) + list.length) % list.length
+    setCur(k)
+    setActive(list[k].section || SECTIONS[0].id)
+    scrollTo(rangeOf(list[k]))
+  }, [scrollTo])
+
+  // Look for the text once the reader pauses typing, then lead them to the first match.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      if (needle.length < 2 || !main.current) {
+        setHits([])
+        setCur(0)
+        return
+      }
+      const found = scan(main.current, needle)
+      setHits(found)
+      jump(found, 0)
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [needle, jump])
+
+  // Paint every match, and the current one more strongly. Nothing in the page is rewritten.
+  useEffect(() => {
+    const reg = registry()
+    const H = HighlightCtor()
+    if (!reg || !H) return
+    if (!hits.length) {
+      reg.delete('docs-hit')
+      reg.delete('docs-active')
+      return
+    }
+    reg.set('docs-hit', new H(...hits.map(rangeOf)))
+    reg.set('docs-active', new H(rangeOf(hits[Math.min(cur, hits.length - 1)])))
+    return () => {
+      reg.delete('docs-hit')
+      reg.delete('docs-active')
+    }
+  }, [hits, cur])
+
+  const goSection = (id: string) => {
     setActive(id)
-    document.getElementById(`doc-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    const el = document.getElementById(`doc-${id}`)
+    if (el) scrollTo(el)
   }
+
+  const related = useMemo(() => {
+    const n = needle.toLowerCase()
+    return n.length >= 2 && !hits.length ? SECTIONS.filter((s) => `${s.title} ${s.keywords}`.toLowerCase().includes(n)) : []
+  }, [needle, hits.length])
+
+  const perSection = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const h of hits) m.set(h.section, (m.get(h.section) ?? 0) + 1)
+    return m
+  }, [hits])
+  const titleOf = (id: string) => SECTIONS.find((s) => s.id === id)?.title ?? ''
+  const showPanel = open && needle.length >= 2
 
   return (
     <div className="docs">
@@ -484,21 +585,80 @@ export function DocsPage() {
         </dl>
       </header>
 
+      <div className="docs__search" role="search">
+        <div className="docs__searchbox">
+          <input
+            type="search" value={q} placeholder="Search the docs — a word, a command, an endpoint…" aria-label="search the docs" autoComplete="off"
+            onChange={(e) => { setQ(e.target.value); setOpen(true) }}
+            onFocus={() => setOpen(true)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); jump(hits, cur + (e.shiftKey ? -1 : 1)); setOpen(false) }
+              else if (e.key === 'Escape') { setOpen(false); if (!needle) e.currentTarget.blur() }
+            }}
+          />
+          {needle.length >= 2 && (
+            <div className="docs__count num" aria-live="polite">
+              {hits.length ? (
+                <>
+                  <span>{cur + 1} of {hits.length}</span>
+                  <button aria-label="previous match" onClick={() => jump(hits, cur - 1)}>↑</button>
+                  <button aria-label="next match" onClick={() => jump(hits, cur + 1)}>↓</button>
+                </>
+              ) : related.length ? <span>related sections only</span> : <span>no match</span>}
+            </div>
+          )}
+          {needle && <button className="docs__clear" aria-label="clear search" onClick={() => { setQ(''); setOpen(false) }}>×</button>}
+        </div>
+
+        {showPanel && (
+          <div className="docs__results" onMouseDown={(e) => e.preventDefault()}>
+            {hits.length > 0 && (
+              <>
+                <p className="docs__resultshead num">{hits.length}{hits.length >= 500 ? '+' : ''} match{hits.length === 1 ? '' : 'es'} in {perSection.size} section{perSection.size === 1 ? '' : 's'}</p>
+                <ul>
+                  {hits.slice(0, 40).map((h, i) => (
+                    <li key={i}>
+                      <button className={i === cur ? 'is-on' : ''} onClick={() => { jump(hits, i); setOpen(false) }}>
+                        <span className="docs__resultsec">{titleOf(h.section)}</span>
+                        <span className="docs__snip">…{h.before}<mark>{h.match}</mark>{h.after}…</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                {hits.length > 40 && <p className="docs__resultshead">Showing the first 40. Use ↑ ↓ or Enter to step through all {hits.length}.</p>}
+              </>
+            )}
+            {!hits.length && related.length > 0 && (
+              <>
+                <p className="docs__resultshead">No exact text match. Related sections:</p>
+                <ul>
+                  {related.map((s) => (
+                    <li key={s.id}><button onClick={() => { goSection(s.id); setOpen(false) }}><span className="docs__resultsec">{s.title}</span></button></li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {!hits.length && !related.length && <p className="docs__resultshead">Nothing in the docs matches “{needle}”.</p>}
+          </div>
+        )}
+      </div>
+
       <div className="docs__layout">
         <nav className="docs__side" aria-label="documentation sections">
-          <input type="search" placeholder="search the docs" value={q} onChange={(e) => setQ(e.target.value)} aria-label="search the docs" />
           <ul>
-            {shown.map((s) => (
+            {SECTIONS.map((s) => (
               <li key={s.id}>
-                <button className={active === s.id ? 'is-on' : ''} onClick={() => go(s.id)}>{s.title}</button>
+                <button className={active === s.id ? 'is-on' : ''} onClick={() => goSection(s.id)}>
+                  {s.title}
+                  {perSection.get(s.id) ? <span className="docs__badge num">{perSection.get(s.id)}</span> : null}
+                </button>
               </li>
             ))}
-            {shown.length === 0 && <li className="docs__none">No section matches.</li>}
           </ul>
         </nav>
-        <article className="docs__main">
-          {shown.map((s) => (
-            <section key={s.id} id={`doc-${s.id}`} className="docs__section">
+        <article className="docs__main" ref={main}>
+          {SECTIONS.map((s) => (
+            <section key={s.id} id={`doc-${s.id}`} data-doc-section={s.id} className="docs__section">
               <h2>{s.title}</h2>
               {s.body}
             </section>

@@ -1337,6 +1337,21 @@ def inflect_batch_plots(batch_id: str, group: str | None = None, max_points: int
     return inf_batch.build_plots(_batch(batch_id), group, max_points, wanted, max_curves)
 
 
+@app.get("/api/inflect/batches/{batch_id}/histograms/files")
+def inflect_batch_histograms_files(batch_id: str, ids: str = Query(..., min_length=1)) -> Any:
+    """The within-file histograms of the files named in ``ids`` (comma-separated, at most 24)."""
+    wanted = [i for i in ids.split(",") if i]
+    if not wanted or len(wanted) > 24:
+        raise HTTPException(400, "ids must name between 1 and 24 files")
+    return {"files": inf_batch.file_histograms(_batch(batch_id), wanted)}
+
+
+@app.get("/api/inflect/batches/{batch_id}/histograms/cross")
+def inflect_batch_histograms_cross(batch_id: str, group: str | None = None) -> Any:
+    """Histograms across files: peak value, peak position, step size, transition position."""
+    return inf_batch.build_cross_histograms(_batch(batch_id), group)
+
+
 @app.get("/api/inflect/batches/{batch_id}/export")
 def inflect_batch_export(batch_id: str) -> Any:
     b = _batch(batch_id)
